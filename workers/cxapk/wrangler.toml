@@ -7,6 +7,10 @@ compatibility_date = "2024-12-01"
 pattern = "apk.07170501.xyz/*"
 zone_name = "07170501.xyz"
 
+[[routes]]
+pattern = "apk.zhaozg.dpdns.org/*"
+zone_name = "zhaozg.dpdns.org"
+
 # 城市/省份限制（不配置则全部允许）
 # IPv4 走 ip2region 城市级匹配，IPv6 降级到 CF 省级匹配
 #[vars]
