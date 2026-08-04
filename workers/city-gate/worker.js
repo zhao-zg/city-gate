@@ -12,7 +12,7 @@
 import { denyPage } from '../shared/deny-page.js';
 
 // ── 默认值 ───────────────────────────────────────────
-const DEFAULT_CITIES = ['Hangzhou'];
+const DEFAULT_CITIES = ['ALL'];
 
 // ── 域名组配置 ────────────────────────────────────────
 // 按源站分组，同组域名共享 cities / origin
@@ -20,6 +20,7 @@ const DEFAULT_CITIES = ['Hangzhou'];
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
+    cities: ['Hangzhou'],
     domains: [
       'sg.1189.dpdns.org',
       'sg.07170501.xyz',
@@ -37,6 +38,16 @@ const DOMAIN_GROUPS = [
       'books.zhaozg.dpdns.org'
     ],
   },
+  {
+    origin: 'https://bible-2o8.pages.dev',
+    cities: ['ALL'],
+    domains: [
+      'bible.zhaozg.dpdns.org',
+      'bible.07170501.xyz',
+      'bible.1189.dpdns.org'
+    ],
+  },
+  
 ];
 
 // ── 构建域名查找表 ────────────────────────────────────
@@ -71,7 +82,12 @@ export default {
     const allowedCities = domainCfg.cities || DEFAULT_CITIES;
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
 
-    // 3. IP 地理判断
+    // 3. 城市为 ALL 时全部放行
+    if (allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL') {
+      return proxyRequest(request, url, origin);
+    }
+
+    // 4. IP 地理判断
     const cf = request.cf || {};
     const city = cf.city || '';
     const region = cf.region || '';
@@ -81,7 +97,7 @@ export default {
       c => city.toLowerCase() === c.toLowerCase()
     );
 
-    // 4. 非允许城市返回 403
+    // 5. 非允许城市返回 403
     if (!isAllowed) {
       return new Response(denyPage(city, region, country), {
         status: 403,
@@ -89,7 +105,7 @@ export default {
       });
     }
 
-    // 5. 允许城市：反向代理到源站
+    // 6. 允许城市：反向代理到源站
     return proxyRequest(request, url, origin);
   },
 };
