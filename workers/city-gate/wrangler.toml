@@ -23,6 +23,18 @@ zone_name = "zhaozg.dpdns.org"
 pattern = "sg.zhaozg.cloudns.org/*"
 zone_name = "zhaozg.cloudns.org"
 
+[[routes]]
+pattern = "books.07170501.xyz/*"
+zone_name = "07170501.xyz"
+
+[[routes]]
+pattern = "books.1189.dpdns.org/*"
+zone_name = "zhaozg.1189.dpdns.org"
+
+[[routes]]
+pattern = "books.zhaozg.dpdns.org/*"
+zone_name = "zhaozg.dpdns.org"
+
 # 环境变量（可选，DOMAIN_CONFIG_JSON 可覆盖代码内配置）
 # [vars]
 # DOMAIN_CONFIG_JSON = '{"sg.example.com":{"cities":["Beijing","Shanghai"],"origin":"https://sg.pages.dev"}}'

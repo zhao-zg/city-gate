@@ -28,12 +28,15 @@ const DOMAIN_GROUPS = [
       'sg.zhaozg.cloudns.org',
     ],
   },
-  // 新增源站组示例：
-  // {
-  //   origin: 'https://bj.pages.dev',
-  //   cities: ['Beijing', 'Shanghai'],
-  //   domains: ['bj.example.com'],
-  // },
+  {
+    origin: 'https://books-89r.pages.dev',
+    cities: ['Hangzhou'],
+    domains: [
+      'books.07170501.xyz',
+      'books.1189.dpdns.org',
+      'books.zhaozg.dpdns.org'
+    ],
+  },
 ];
 
 // ── 构建域名查找表 ────────────────────────────────────
