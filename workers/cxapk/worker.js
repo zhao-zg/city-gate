@@ -14,13 +14,14 @@
 import { denyPage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
-// 源站列表，cx 会被 URL 路径段替换（如 /sg → sg.1189.dpdns.org）
-const FALLBACK_BASES = [
-  'https://cx.1189.dpdns.org/',
-  'https://cx.zhaozg.dpdns.org/',
-  'https://cx.07170501.xyz/',
-  'https://cx.11891189.xyz/'
-];
+// 源站列表（直连 Pages 源站，绕过 city-gate 地理限制，避免 Worker 自抓被 403）
+// key: 路径段前缀, value: Pages 源站 URL
+const PAGES_ORIGINS = {
+  sg:   'https://sg-7gj.pages.dev/',
+  cx:   'https://cx-1wd.pages.dev/',
+  bible: 'https://bible-2o8.pages.dev/',
+  books: 'https://books-89r.pages.dev/',
+};
 
 export default {
   async fetch(request, env) {
@@ -73,30 +74,28 @@ export default {
     // ── APK 代理逻辑 ──
     const url = new URL(request.url);
     const seg = url.pathname.split('/').filter(Boolean)[0] || '';
-    const allBases = seg
-      ? FALLBACK_BASES.map(b => b.replace('cx', seg))
-      : FALLBACK_BASES;
+    const origin = PAGES_ORIGINS[seg] || PAGES_ORIGINS['cx'];
+    const basePath = url.pathname.replace(/^\/[^/]+/, '') || '/';
 
-    for (const base of allBases) {
-      try {
-        const res = await fetch(base + 'version.json', { cf: { cacheEverything: false } });
-        if (!res.ok) continue;
-        const { apk_file } = await res.json();
-        if (!apk_file) continue;
-        const apkRes = await fetch(base + apk_file);
-        if (!apkRes.ok) continue;
-        return new Response(apkRes.body, {
-          status: 200,
-          headers: {
-            'Content-Type': apkRes.headers.get('Content-Type') || 'application/vnd.android.package-archive',
-            'Content-Length': apkRes.headers.get('Content-Length') || '',
-            'Content-Disposition': 'attachment; filename="' + apk_file.split('/').pop() + '"',
-          },
-        });
-      } catch (_) {
-        continue;
-      }
+    // version.json 在源站根目录
+    const baseUrl = seg ? origin : PAGES_ORIGINS['cx'];
+    try {
+      const res = await fetch(baseUrl + 'version.json', { cf: { cacheEverything: false } });
+      if (!res.ok) return new Response('APK 暂时无法获取，请稍后重试', { status: 502 });
+      const { apk_file } = await res.json();
+      if (!apk_file) return new Response('APK 信息缺失', { status: 502 });
+      const apkRes = await fetch(baseUrl + apk_file);
+      if (!apkRes.ok) return new Response('APK 下载失败', { status: 502 });
+      return new Response(apkRes.body, {
+        status: 200,
+        headers: {
+          'Content-Type': apkRes.headers.get('Content-Type') || 'application/vnd.android.package-archive',
+          'Content-Length': apkRes.headers.get('Content-Length') || '',
+          'Content-Disposition': 'attachment; filename="' + apk_file.split('/').pop() + '"',
+        },
+      });
+    } catch (_) {
+      return new Response('APK 暂时无法获取，请稍后重试', { status: 502 });
     }
-    return new Response('APK 暂时无法获取，请稍后重试', { status: 502 });
   },
 };
