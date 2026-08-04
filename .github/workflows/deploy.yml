@@ -86,8 +86,13 @@ jobs:
           fi
 
           if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
-            sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" workers/city-gate/wrangler.toml
-            echo "已注入 KV namespace id: $KV_ID"
+            # 注入到所有包含占位符的 wrangler.toml
+            for toml in workers/*/wrangler.toml; do
+              if grep -q "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" "$toml"; then
+                sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" "$toml"
+                echo "已注入 KV namespace id 到 $toml: $KV_ID"
+              fi
+            done
           else
             echo "警告: 未找到 KV namespace id，Worker 可能无法正常工作"
           fi
