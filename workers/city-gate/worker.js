@@ -60,53 +60,17 @@ export default {
     const allowedCities = domainCfg.cities || DEFAULT_CITIES;
     const origin = domainCfg.origin || env.PAGES_ORIGIN || DEFAULT_ORIGIN;
 
-    // 3. 获取访客真实 IP（优先从上游 Worker 传递的头获取）
-    const realIP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || '';
-
-    // 4. IP 地理判断
-    //    - 有真实 IP 时：通过 Cloudflare /json 头查询地理信息
-    //    - 无真实 IP 时：回退到 request.cf（直接访问时有效）
-    let city = '';
-    let region = '';
-    let country = '';
-
-    if (realIP) {
-      try {
-        const geoRes = await fetch(`https://1.1.1.1/cdn-cgi/trace?ip=${realIP}`);
-        const geoText = await geoRes.text();
-        // 解析 trace 输出：loc=XX,XX → city / region / country
-        const traceObj = {};
-        geoText.split('\n').forEach(line => {
-          const [k, ...v] = line.split('=');
-          if (k && v.length) traceObj[k.trim()] = v.join('=').trim();
-        });
-        // trace 格式：loc=XX,XX  (纬度,经度)，没有城市名
-        // 改用 Cloudflare IP 地理接口
-        const ipRes = await fetch(`https://speed.cloudflare.com/meta?ip=${realIP}`);
-        if (ipRes.ok) {
-          const ipInfo = await ipRes.json();
-          city = ipInfo.city || '';
-          region = ipInfo.region || '';
-          country = ipInfo.country || '';
-        }
-      } catch {
-        // 查询失败，回退到 request.cf
-        city = (request.cf || {}).city || '';
-        region = (request.cf || {}).region || '';
-        country = (request.cf || {}).country || '';
-      }
-    } else {
-      const cf = request.cf || {};
-      city = cf.city || '';
-      region = cf.region || '';
-      country = cf.country || '';
-    }
+    // 3. IP 地理判断
+    const cf = request.cf || {};
+    const city = cf.city || '';
+    const region = cf.region || '';
+    const country = cf.country || '';
 
     const isAllowed = allowedCities.some(
       c => city.toLowerCase() === c.toLowerCase()
     );
 
-    // 5. 非允许城市返回 403
+    // 4. 非允许城市返回 403
     if (!isAllowed) {
       return new Response(denyPage(city, region, country), {
         status: 403,
@@ -114,7 +78,7 @@ export default {
       });
     }
 
-    // 6. 允许城市：反向代理到源站
+    // 5. 允许城市：反向代理到源站
     return proxyRequest(request, url, origin);
   },
 };

@@ -1,0 +1,12 @@
+name = "cxapk"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# 路由配置
+[[routes]]
+pattern = "apk.07170501.xyz/*"
+zone_name = "07170501.xyz"
+
+# 城市限制（不配置则全部允许）
+[vars]
+ALLOWED_CITIES = "Hangzhou"
