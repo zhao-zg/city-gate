@@ -200,18 +200,25 @@ async function getKvValue(namespaceId, key) {
 }
 
 /**
- * 检查 KV key 是否存在（用 metadata 接口，不读取完整内容，对大文件友好）
- * Cloudflare KV 不支持 HEAD 请求，但 keys 列表 API 可以检查
+ * 检查 KV key 是否存在（只检查 status code，不读取完整内容）
+ * Cloudflare KV 不支持 HEAD，用 GET + Range 头限制只读 1 字节
  */
 async function kvKeyExists(namespaceId, key) {
-  // 使用 list-keys endpoint 检查 key 是否存在
-  // prefix 匹配 + 限定数量1，比读完整 value 快得多
-  const res = await cfApi(
-    `/storage/kv/namespaces/${namespaceId}/keys?prefix=${encodeURIComponent(key)}&limit=1`
-  );
-  if (!res.ok) throw new Error(`KV keys 查询失败: HTTP ${res.status} key=${key}`);
-  const data = await res.json();
-  return data.result && data.result.some(k => k.name === key);
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Range': 'bytes=0-0', // 只读 1 字节
+    },
+  });
+  if (res.status === 404) return false;
+  if (res.ok || res.status === 206) return true;
+  // Range 不支持时完整返回也算存在
+  if (res.status === 200) return true;
+  throw new Error(`KV 存在性检查失败: HTTP ${res.status} key=${key}`);
 }
 
 async function putKvValue(namespaceId, key, value, metadata = {}) {
