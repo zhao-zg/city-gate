@@ -47,6 +47,13 @@ const DOMAIN_GROUPS = [
       'bible.1189.dpdns.org'
     ],
   },
+  {
+    origin: 'https://cx-1wd.pages.dev',
+    cities: ['ALL'],
+    domains: [
+      'cx.zhaozg.dpdns.org'
+    ],
+  },
   
 ];
 

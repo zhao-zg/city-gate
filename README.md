@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '5a8e97f8-4ba4-4e4a-8501-31b8a99a3b6a'
-  PropagateID: '5a8e97f8-4ba4-4e4a-8501-31b8a99a3b6a'
-  ReservedCode1: '8ed10ee2-4718-43eb-aedb-843f97abe382'
-  ReservedCode2: '8ed10ee2-4718-43eb-aedb-843f97abe382'
+  ProduceID: '3c707888-94c8-42e0-abbf-9d15fc72e4ca'
+  PropagateID: '3c707888-94c8-42e0-abbf-9d15fc72e4ca'
+  ReservedCode1: '5ffc6d78-9534-43f2-8d7c-e94413ad186e'
+  ReservedCode2: '5ffc6d78-9534-43f2-8d7c-e94413ad186e'
 ---
 
 # city-gate
@@ -78,6 +78,59 @@ npx wrangler deploy
 ```
 
 推送 master 分支会自动部署全部 Worker（GitHub Actions）。
+
+## DNS CNAME 同步
+
+`scripts/sync-cname.js` 脚本自动管理 Cloudflare DNS 中的 CNAME 记录，将指定 zone 下的域名指向优选域名。
+
+### 当前配置
+
+| Zone | 域名 | CNAME 目标 |
+|------|------|-----------|
+| `zhaozg.dpdns.org` | sg / books / bible / cx | `saas.sin.fan` |
+
+### 脚本逻辑
+
+对每个配置的域名：
+- 已有 CNAME 且目标正确 → 跳过
+- 已有 CNAME 但目标不同 → 删除旧记录，新建指向优选域名
+- 无 CNAME → 新建记录
+
+### 本地运行
+
+```bash
+# 预览模式（不执行修改）
+CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/sync-cname.js
+
+# 实际执行
+CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
+```
+
+### GitHub Actions
+
+- **手动触发**：Actions → 同步 DNS CNAME → Run workflow（可选预览模式）
+- **自动触发**：`scripts/sync-cname.js` 文件变更推送到 master 时自动同步
+- 需要在仓库 Secrets 中配置 `CLOUDFLARE_API_TOKEN`（需 Zone:DNS:Edit 权限）
+
+### 新增优选域名
+
+编辑 `scripts/sync-cname.js` 中的 `CNAME_MAP` 数组：
+
+```js
+const CNAME_MAP = [
+  {
+    zoneName: 'zhaozg.dpdns.org',
+    target: 'saas.sin.fan',
+    names: ['sg', 'books', 'bible', 'cx'],
+  },
+  // 新增优选域名示例：
+  // {
+  //   zoneName: '1189.dpdns.org',
+  //   target: 'preferred2.example.com',
+  //   names: ['sg', 'books', 'bible'],
+  // },
+];
+```
 
 ## 环境变量
 
