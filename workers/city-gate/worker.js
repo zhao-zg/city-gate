@@ -1,25 +1,34 @@
 /**
- * Cloudflare Worker — 城市IP访问限制网关
+ * Cloudflare Worker — 城市IP访问限制网关（多城市版）
  *
- * 部署在自定义域名上，仅允许指定城市的 IP 访问。
- * 非允许城市的请求返回 403，允许城市的请求反向代理到源站。
+ * 一个 Worker 即可服务多个域名，每个域名独立配置允许的城市和源站。
+ * 新增城市只需在 DOMAIN_CONFIG 中加一条，再在 wrangler.toml 加一条路由。
  *
- * 环境变量（在 Cloudflare Dashboard 或 wrangler.toml 中设置）:
- *   ALLOWED_CITIES  — 允许的城市列表，逗号分隔（默认 "Hangzhou"）
- *   PAGES_ORIGIN    — 源站地址（默认 "https://sg.pages.dev"）
+ * 域名配置格式：
+ *   "域名": { cities: ["城市1", "城市2"], origin: "https://源站" }
  */
 
-// ── 配置 ──────────────────────────────────────────────
-
-// 域名 → 源站映射（优先使用环境变量 PAGES_ORIGIN，此处作兜底）
-const DOMAIN_MAP = {
-  'sg.1189.dpdns.org':    'https://sg.pages.dev',
-  'sg.07170501.xyz':      'https://sg.pages.dev',
-  'sg.bxg.dpdns.org':     'https://sg.pages.dev',
+// ── 域名配置 ──────────────────────────────────────────
+// 每个域名的允许城市列表 + 代理源站
+// 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
+const DOMAIN_CONFIG = {
+  'sg.1189.dpdns.org': {
+    cities: ['Hangzhou'],
+    origin: 'https://sg.pages.dev',
+  },
+  'sg.07170501.xyz': {
+    cities: ['Hangzhou'],
+    origin: 'https://sg.pages.dev',
+  },
+  'sg.bxg.dpdns.org': {
+    cities: ['Hangzhou'],
+    origin: 'https://sg.pages.dev',
+  },
 };
 
-// 默认允许的城市（Cloudflare request.cf.city 的值）
-const DEFAULT_ALLOWED_CITIES = ['Hangzhou'];
+// 兜底默认值（域名未匹配时使用）
+const DEFAULT_ORIGIN = 'https://sg.pages.dev';
+const DEFAULT_CITIES = ['Hangzhou'];
 
 // ── Worker 入口 ───────────────────────────────────────
 
@@ -28,32 +37,40 @@ export default {
     const url = new URL(request.url);
     const hostname = url.hostname;
 
-    // 1. 查找源站
-    const origin = env.PAGES_ORIGIN || DOMAIN_MAP[hostname] || 'https://sg.pages.dev';
+    // 1. 加载配置：环境变量优先，否则用代码内配置
+    let config;
+    try {
+      config = env.DOMAIN_CONFIG_JSON
+        ? JSON.parse(env.DOMAIN_CONFIG_JSON)
+        : DOMAIN_CONFIG;
+    } catch {
+      config = DOMAIN_CONFIG;
+    }
 
-    // 2. IP 地理判断
+    // 2. 查找当前域名的城市列表和源站
+    const domainCfg = config[hostname] || {};
+    const allowedCities = domainCfg.cities || DEFAULT_CITIES;
+    const origin = domainCfg.origin || env.PAGES_ORIGIN || DEFAULT_ORIGIN;
+
+    // 3. IP 地理判断
     const cf = request.cf || {};
     const city = cf.city || '';
     const region = cf.region || '';
     const country = cf.country || '';
 
-    const allowedCities = (env.ALLOWED_CITIES || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-    const cityList = allowedCities.length > 0 ? allowedCities : DEFAULT_ALLOWED_CITIES;
+    const isAllowed = allowedCities.some(
+      c => city.toLowerCase() === c.toLowerCase()
+    );
 
-    const isAllowed = cityList.some(c => city.toLowerCase() === c.toLowerCase());
-
-    // 3. 非允许城市返回 403
+    // 4. 非允许城市返回 403
     if (!isAllowed) {
-      return new Response(denyPage(city, region, country, cityList.join(', ')), {
+      return new Response(denyPage(city, region, country, allowedCities.join(', ')), {
         status: 403,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
     }
 
-    // 4. 允许城市：反向代理到源站
+    // 5. 允许城市：反向代理到源站
     return proxyRequest(request, url, origin);
   },
 };

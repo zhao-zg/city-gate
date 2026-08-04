@@ -3,49 +3,59 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'a021f8a6-bbd4-463b-a974-ef33260a65bc'
-  PropagateID: 'a021f8a6-bbd4-463b-a974-ef33260a65bc'
-  ReservedCode1: '3c522aa5-bcb2-46d8-ad60-b17b75802293'
-  ReservedCode2: '3c522aa5-bcb2-46d8-ad60-b17b75802293'
+  ProduceID: '54723ced-0010-4610-ba6a-6024b8272334'
+  PropagateID: '54723ced-0010-4610-ba6a-6024b8272334'
+  ReservedCode1: '330021fd-5535-4275-a5da-9ba42dc4f93c'
+  ReservedCode2: '330021fd-5535-4275-a5da-9ba42dc4f93c'
 ---
 
 # city-gate
 
-基于 Cloudflare Workers 的城市 IP 访问限制网关。
+基于 Cloudflare Workers 的城市 IP 访问限制网关。一个 Worker 支持多域名、多城市配置。
 
 ## 架构
 
 ```
-用户请求 → Cloudflare Worker → 判断 IP 城市 → 放行 / 403
+用户请求 → Cloudflare Worker → 按域名查城市配置 → 放行 / 403
 ```
 
-## Workers
+## 核心设计
 
-| Worker | 说明 | 允许城市 | 代理目标 |
-|--------|------|----------|----------|
-| hangzhou-gate | 杭州 IP 限制网关 | Hangzhou | sg.pages.dev |
+一个 Worker 服务所有域名，通过 `DOMAIN_CONFIG` 字典按域名配置：
+- **cities**: 允许访问的城市列表（Cloudflare `request.cf.city` 值）
+- **origin**: 反向代理的源站地址
 
-## 添加新 Worker
+```js
+const DOMAIN_CONFIG = {
+  'sg.1189.dpdns.org': { cities: ['Hangzhou'],             origin: 'https://sg.pages.dev' },
+  'sg.07170501.xyz':   { cities: ['Hangzhou'],             origin: 'https://sg.pages.dev' },
+  'sg.bxg.dpdns.org':  { cities: ['Hangzhou'],             origin: 'https://sg.pages.dev' },
+  // 新增域名示例：
+  // 'bj.example.com':  { cities: ['Beijing', 'Shanghai'],  origin: 'https://sg.pages.dev' },
+};
+```
 
-1. 在 `workers/` 下创建目录，例如 `workers/beijing-gate/`
-2. 编写 `worker.js` 和 `wrangler.toml`
-3. 在 `.github/workflows/deploy.yml` 的 `WORKERS` 列表中添加名称
-4. 推送后自动部署
+## 添加新域名/城市
+
+1. 在 `worker.js` 的 `DOMAIN_CONFIG` 中添加域名配置
+2. 在 `wrangler.toml` 中添加路由：
+   ```toml
+   [[routes]]
+   pattern = "bj.example.com/*"
+   zone_name = "example.com"
+   ```
+3. 部署即可
 
 ## 部署
 
-推送代码到 master 分支即可自动部署，也可手动：
-
 ```bash
-cd workers/hangzhou-gate
+cd workers/city-gate
 npx wrangler deploy
 ```
 
 ## 环境变量
 
-每个 Worker 支持通过环境变量覆盖配置：
-
 | 变量 | 说明 |
 |------|------|
-| `ALLOWED_CITIES` | 允许的城市，逗号分隔 |
-| `PAGES_ORIGIN` | 代理的 Pages 源站地址 |
+| `DOMAIN_CONFIG_JSON` | JSON 字符串，覆盖代码内 DOMAIN_CONFIG |
+| `PAGES_ORIGIN` | 兜底源站地址 |

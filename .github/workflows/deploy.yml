@@ -44,7 +44,7 @@ jobs:
         run: |
           for worker in ${{ steps.workers.outputs.list }}; do
             echo "🚀 部署 $worker ..."
-            if wrangler deploy "workers/$worker" --config "workers/$worker/wrangler.toml"; then
+            if (cd "workers/$worker" && wrangler deploy); then
               echo "✓ $worker 部署成功"
             else
               echo "✗ $worker 部署失败"
