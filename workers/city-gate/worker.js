@@ -14,23 +14,23 @@
 const DOMAIN_CONFIG = {
   'sg.1189.dpdns.org': {
     cities: ['Hangzhou'],
-    origin: 'https://sg.pages.dev',
+    origin: 'https://sg-7gj.pages.dev',
   },
   'sg.07170501.xyz': {
     cities: ['Hangzhou'],
-    origin: 'https://sg.pages.dev',
+    origin: 'https://sg-7gj.pages.dev',
   },
   'sg.bxg.dpdns.org': {
     cities: ['Hangzhou'],
-    origin: 'https://sg.pages.dev',
+    origin: 'https://sg-7gj.pages.dev',
   },
   'sg.zhaozg.dpdns.org': {
     cities: ['Hangzhou'],
-    origin: 'https://sg.pages.dev',
+    origin: 'https://sg-7gj.pages.dev',
   },
   'sg.zhaozg.cloudns.org': {
     cities: ['Hangzhou'],
-    origin: 'https://sg.pages.dev',
+    origin: 'https://sg-7gj.pages.dev',
   },
 };
 
