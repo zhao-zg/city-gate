@@ -25,7 +25,7 @@ const CNAME_MAP = [
   {
     zoneName: 'zhaozg.dpdns.org',
     target: 'saas.sin.fan',
-    names: ['sg', 'books', 'bible', 'cx'],
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource'],
     // names 会拼接为 sg.zhaozg.dpdns.org, books.zhaozg.dpdns.org 等
   },
   // 示例：后续扩展更多优选域名

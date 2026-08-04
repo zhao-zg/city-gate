@@ -54,7 +54,13 @@ const DOMAIN_GROUPS = [
       'cx.zhaozg.dpdns.org'
     ],
   },
-  
+  {
+    origin: 'https://sg-resource.pages.dev',
+    cities: ['ALL'],
+    domains: [
+      'sg-resource.zhaozg.dpdns.org'
+    ],
+  }
 ];
 
 // ── 构建域名查找表 ────────────────────────────────────
