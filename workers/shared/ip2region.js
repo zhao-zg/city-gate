@@ -7,8 +7,8 @@
  * xdb 数据从 KV 加载后存入全局变量，冷启动后首次读取约 10ms，
  * 后续所有查询均为纯内存操作，延迟 < 0.1ms。
  *
- * 格式：国家|区域|省份|城市|ISP
- * 例：  中国|0|浙江省|杭州市|电信
+ * 格式（v3 xdb）：国家|省份/州|城市|运营商|国家代码
+ * 例：  中国|浙江省|杭州市|电信|CN
  *
  * @see https://github.com/lionsoul2014/ip2region
  */
@@ -105,7 +105,7 @@ class Searcher {
   /**
    * 查询 IP 归属地
    * @param {string} ip - IPv4 或 IPv6 地址
-   * @returns {string} - 格式：国家|区域|省份|城市|ISP
+   * @returns {string} - 格式（v3）：国家|省份|城市|运营商|国家代码
    */
   search(ip) {
     const { bytes, version } = parseIP(ip);
@@ -122,6 +122,7 @@ class Searcher {
     if (sPtr === 0 || ePtr === 0) return '';
 
     // 二分查找
+    // index entry 结构: [start_ip][end_ip][data_len:2B][data_ptr:4B]
     const indexSize = this.indexSize;
     const bLen = bytes.length;
     const dOff = bLen * 2; // data 区域在 index entry 中的偏移
@@ -132,12 +133,24 @@ class Searcher {
       const m = (l + h) >> 1;
       const p = sPtr + m * indexSize;
 
-      const cmp = this._compareIP(bytes, p);
-      if (cmp < 0) {
+      const startCmp = this._compareIP(bytes, p, 0);
+      if (startCmp < 0) {
+        // input < start_ip → 往左
         h = m - 1;
-      } else if (cmp > 0) {
-        l = m + 1;
+      } else if (startCmp > 0) {
+        // input > start_ip，还需检查 input <= end_ip
+        const endCmp = this._compareIP(bytes, p, bLen);
+        if (endCmp > 0) {
+          // input > end_ip → 往右
+          l = m + 1;
+        } else {
+          // start_ip <= input <= end_ip → 匹配成功
+          dLen = this._readU16(p + dOff);
+          dPtr = this._readU32(p + dOff + 2);
+          break;
+        }
       } else {
+        // input == start_ip → 匹配成功
         dLen = this._readU16(p + dOff);
         dPtr = this._readU32(p + dOff + 2);
         break;
@@ -146,24 +159,26 @@ class Searcher {
 
     if (dLen === 0) return '';
 
-    // 读取 region 字符串
-    let region = '';
-    for (let i = 0; i < dLen; i++) {
-      region += String.fromCharCode(this.buf[dPtr + i]);
-    }
-    return region;
+    // 读取 region 字符串（UTF-8 编码）
+    const regionBuf = this.buf.slice(dPtr, dPtr + dLen);
+    return new TextDecoder().decode(regionBuf);
   }
 
   /**
    * 比较 IP 与 xdb index entry 中的 IP
-   * IPv4: index 中是 little-endian，需要反转比较
+   * IPv4: index 中是 little-endian，需要反序比较
    * IPv6: 直接 big-endian 比较
+   *
+   * @param {Uint8Array} ipBytes - 输入 IP 的字节数组（big-endian）
+   * @param {number} entryOffset - index entry 在 xdb 中的偏移
+   * @param {number} ipOffset - IP 字段在 entry 中的偏移（0=start_ip, bytes=end_ip）
+   * @returns {number} -1/0/1
    */
-  _compareIP(ipBytes, entryOffset) {
+  _compareIP(ipBytes, entryOffset, ipOffset) {
     if (this.version === 4) {
       // IPv4 index entry: [start_ip LE 4B] [end_ip LE 4B] [data_len 2B] [data_ptr 4B]
-      // 比较 start_ip (little-endian)
-      for (let i = 0, j = 3; i < 4; i++, j--) {
+      // 比较 IP 字段（little-endian 存储），反向读取
+      for (let i = 0, j = ipOffset + 3; i < 4; i++, j--) {
         const a = ipBytes[i] & 0xFF;
         const b = this.buf[entryOffset + j] & 0xFF;
         if (a < b) return -1;
@@ -174,7 +189,7 @@ class Searcher {
       // IPv6: big-endian 直接比较
       for (let i = 0; i < 16; i++) {
         const a = ipBytes[i] & 0xFF;
-        const b = this.buf[entryOffset + i] & 0xFF;
+        const b = this.buf[entryOffset + ipOffset + i] & 0xFF;
         if (a < b) return -1;
         if (a > b) return 1;
       }
@@ -216,7 +231,7 @@ export async function initIp2Region(kv, key = 'ip2region_v4.xdb') {
 /**
  * 查询 IP 归属地
  * @param {string} ip - IP 地址
- * @returns {string|null} - 格式：国家|区域|省份|城市|ISP，未初始化返回 null
+ * @returns {string|null} - 格式（v3）：国家|省份|城市|运营商|国家代码，未初始化返回 null
  */
 export function searchIp2Region(ip) {
   if (!_searcher) return null;
@@ -229,17 +244,33 @@ export function searchIp2Region(ip) {
 
 /**
  * 解析 ip2region 返回的 region 字符串
- * @param {string} region - 如 "中国|0|浙江省|杭州市|电信"
- * @returns {{country, region, province, city, isp}}
+ *
+ * v2 格式：国家|区域|省份|城市|ISP
+ * v3 格式：国家|省份/州|城市|运营商|国家代码
+ *
+ * @param {string} region - 如 "中国|浙江省|杭州市|电信|CN" 或 "Australia|Queensland|Brisbane|0|AU"
+ * @returns {{country, province, city, isp}}
  */
 export function parseRegionString(region) {
-  if (!region) return { country: '', region: '', province: '', city: '', isp: '' };
+  if (!region) return { country: '', province: '', city: '', isp: '' };
   const parts = region.split('|');
+  // v3 格式：国家|省份|城市|运营商|国家代码
+  // v2 格式：国家|区域|省份|城市|ISP（5段时第4段是ISP）
+  // 区分方法：v3 第5段是2字符国家代码；v2 第2段是"0"或区域名
+  if (parts.length >= 5 && parts[4].length === 2) {
+    // v3 格式
+    return {
+      country: parts[0] || '',
+      province: parts[1] || '',
+      city: parts[2] || '',
+      isp: parts[3] || '',
+    };
+  }
+  // v2 格式（兼容旧版）
   return {
     country: parts[0] || '',
-    region:  parts[1] || '',
     province: parts[2] || '',
-    city:    parts[3] || '',
-    isp:     parts[4] || '',
+    city: parts[3] || '',
+    isp: parts[4] || '',
   };
 }
