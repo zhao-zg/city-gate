@@ -2,41 +2,49 @@
  * Cloudflare Worker — 城市IP访问限制网关（多城市版）
  *
  * 一个 Worker 即可服务多个域名，每个域名独立配置允许的城市和源站。
- * 新增城市只需在 DOMAIN_CONFIG 中加一条，再在 wrangler.toml 加一条路由。
+ * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
  *
- * 域名配置格式：
- *   "域名": { cities: ["城市1", "城市2"], origin: "https://源站" }
+ * 配置方式 — 域名组：
+ *   按源站分组，同组的域名共享 cities 和 origin，不用重复写。
+ *   个别域名有差异时，在 overrides 中覆盖。
  */
 
-// ── 域名配置 ──────────────────────────────────────────
-// 每个域名的允许城市列表 + 代理源站
-// 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
-const DOMAIN_CONFIG = {
-  'sg.1189.dpdns.org': {
-    cities: ['Hangzhou'],
-    origin: 'https://sg-7gj.pages.dev',
-  },
-  'sg.07170501.xyz': {
-    cities: ['Hangzhou'],
-    origin: 'https://sg-7gj.pages.dev',
-  },
-  'sg.bxg.dpdns.org': {
-    cities: ['Hangzhou'],
-    origin: 'https://sg-7gj.pages.dev',
-  },
-  'sg.zhaozg.dpdns.org': {
-    cities: ['Hangzhou'],
-    origin: 'https://sg-7gj.pages.dev',
-  },
-  'sg.zhaozg.cloudns.org': {
-    cities: ['Hangzhou'],
-    origin: 'https://sg-7gj.pages.dev',
-  },
-};
+import { denyPage } from '../shared/deny-page.js';
 
-// 兜底默认值（域名未匹配时使用）
-const DEFAULT_ORIGIN = 'https://sg.pages.dev';
+// ── 默认值 ───────────────────────────────────────────
 const DEFAULT_CITIES = ['Hangzhou'];
+
+// ── 域名组配置 ────────────────────────────────────────
+// 按源站分组，同组域名共享 cities / origin
+// 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
+const DOMAIN_GROUPS = [
+  {
+    origin: 'https://sg-7gj.pages.dev',
+    domains: [
+      'sg.1189.dpdns.org',
+      'sg.07170501.xyz',
+      'sg.bxg.dpdns.org',
+      'sg.zhaozg.dpdns.org',
+      'sg.zhaozg.cloudns.org',
+    ],
+  },
+  // 新增源站组示例：
+  // {
+  //   origin: 'https://bj.pages.dev',
+  //   cities: ['Beijing', 'Shanghai'],
+  //   domains: ['bj.example.com'],
+  // },
+];
+
+// ── 构建域名查找表 ────────────────────────────────────
+// 将分组配置展开为 { hostname → { cities, origin } } 的扁平字典
+const DOMAIN_CONFIG = {};
+for (const group of DOMAIN_GROUPS) {
+  const cities = group.cities || DEFAULT_CITIES;
+  for (const domain of group.domains) {
+    DOMAIN_CONFIG[domain] = { cities, origin: group.origin };
+  }
+}
 
 // ── Worker 入口 ───────────────────────────────────────
 
@@ -58,7 +66,7 @@ export default {
     // 2. 查找当前域名的城市列表和源站
     const domainCfg = config[hostname] || {};
     const allowedCities = domainCfg.cities || DEFAULT_CITIES;
-    const origin = domainCfg.origin || env.PAGES_ORIGIN || DEFAULT_ORIGIN;
+    const origin = domainCfg.origin || env.PAGES_ORIGIN;
 
     // 3. IP 地理判断
     const cf = request.cf || {};
@@ -114,55 +122,4 @@ async function proxyRequest(request, url, origin) {
   });
 }
 
-// ── 403 页面 ─────────────────────────────────────────
 
-function denyPage(city, region, country) {
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>访问受限</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      color: #fff;
-    }
-    .card {
-      background: rgba(255,255,255,0.12);
-      backdrop-filter: blur(20px);
-      border-radius: 20px;
-      padding: 48px 40px;
-      max-width: 420px;
-      text-align: center;
-      border: 1px solid rgba(255,255,255,0.2);
-    }
-    .icon { font-size: 64px; margin-bottom: 24px; }
-    h1 { font-size: 24px; margin-bottom: 12px; }
-    p { font-size: 14px; line-height: 1.8; opacity: 0.9; }
-    .info {
-      margin-top: 20px;
-      padding: 12px 20px;
-      background: rgba(255,255,255,0.1);
-      border-radius: 12px;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">&#128274;</div>
-    <h1>访问受限</h1>
-    <p>您所在的地区暂不支持访问<br>如有需要请联系管理员</p>
-    <div class="info">
-      您的 IP 归属地：${city || '未知'}${region ? '，' + region : ''}${country ? '，' + country : ''}
-    </div>
-  </div>
-</body>
-</html>`;
-}
