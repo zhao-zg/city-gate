@@ -200,15 +200,18 @@ async function getKvValue(namespaceId, key) {
 }
 
 /**
- * 检查 KV key 是否存在（不读取完整内容，对大文件友好）
+ * 检查 KV key 是否存在（用 metadata 接口，不读取完整内容，对大文件友好）
+ * Cloudflare KV 不支持 HEAD 请求，但 keys 列表 API 可以检查
  */
 async function kvKeyExists(namespaceId, key) {
-  const res = await cfApi(`/storage/kv/namespaces/${namespaceId}/values/${key}`, {
-    method: 'HEAD',
-  });
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`KV HEAD 失败: HTTP ${res.status} key=${key}`);
-  return true;
+  // 使用 list-keys endpoint 检查 key 是否存在
+  // prefix 匹配 + 限定数量1，比读完整 value 快得多
+  const res = await cfApi(
+    `/storage/kv/namespaces/${namespaceId}/keys?prefix=${encodeURIComponent(key)}&limit=1`
+  );
+  if (!res.ok) throw new Error(`KV keys 查询失败: HTTP ${res.status} key=${key}`);
+  const data = await res.json();
+  return data.result && data.result.some(k => k.name === key);
 }
 
 async function putKvValue(namespaceId, key, value, metadata = {}) {
