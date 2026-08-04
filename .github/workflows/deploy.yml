@@ -15,8 +15,8 @@ on:
         type: string
         default: '1'
   schedule:
-    # 每周一 UTC 0:00 自动检查 xdb 更新
-    - cron: '0 0 * * 1'
+    # 每天 UTC 0:00 自动检查 v4/v6 xdb 更新
+    - cron: '0 0 * * *'
 
 jobs:
   # ── Job 1：检查并更新 ip2region xdb ──────────────────
