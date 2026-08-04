@@ -23,7 +23,7 @@ jobs:
   update-xdb:
     runs-on: ubuntu-latest
     # 手动指定跳过时不执行；定时/推送时默认执行
-    if: ${{ github.event.inputs.update_xdb != '0' }}
+    if: ${{ github.event.inputs.update_xdb != '0' || github.event_name == 'push' || github.event_name == 'schedule' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
