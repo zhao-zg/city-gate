@@ -1,31 +1,34 @@
 /**
- * Cloudflare Worker — 城市IP访问限制网关（多城市版）
+ * Cloudflare Worker — IP访问限制网关（多域名版）
  *
- * 一个 Worker 即可服务多个域名，每个域名独立配置允许的城市和源站。
+ * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
  * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
  *
- * 配置方式 — 域名组：
- *   按源站分组，同组的域名共享 geo / origin，不用重复写。
- *   个别域名有差异时，在 overrides 中覆盖。
+ * 地理匹配策略（三级，满足任一即放行）：
+ *   1. region 省级匹配  — 精度最高，省级由运营商IP段决定，几乎不会错
+ *   2. geo 经纬度距离   — 精度中等，容错范围比城市名大
+ *   3. city 城市名匹配  — 精度最低，向下兼容旧配置
  *
- * 地理匹配策略：
- *   geo: { lat, lon, radiusKm } — 经纬度 + 半径(km)，精度远高于城市名匹配
- *   cities: ['Hangzhou']      — 旧方式，城市名精确匹配（向下兼容）
- *   两者同时配置时 geo 优先
+ * 配置方式 — 域名组：
+ *   按源站分组，同组的域名共享 regions / geo / origin
  */
 
 import { denyPage } from '../shared/deny-page.js';
+import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // ── 默认值 ───────────────────────────────────────────
 const DEFAULT_CITIES = ['ALL'];
 
 // ── 域名组配置 ────────────────────────────────────────
-// 按源站分组，同组域名共享 geo / cities / origin
+// regions: 省份中文名（如 浙江、上海），同时兼容 Cloudflare 英文名（Zhejiang）
+// geo:     { lat, lon, radiusKm } 经纬度 + 半径，作为 region 的补充
+// cities:  旧方式，城市名精确匹配（向下兼容）
 // 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
-    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 70 }, // 杭州 70km
+    regions: ['浙江', '上海', 'Zhejiang', 'Shanghai'],
+    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 150 }, // 杭州 150km 兜底
     domains: [
       'sg.1189.dpdns.org',
       'sg.07170501.xyz',
@@ -36,7 +39,8 @@ const DOMAIN_GROUPS = [
   },
   {
     origin: 'https://books-89r.pages.dev',
-    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 70 }, // 杭州 70km
+    regions: ['浙江', '上海', 'Zhejiang', 'Shanghai'],
+    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 150 },
     domains: [
       'books.07170501.xyz',
       'books.1189.dpdns.org',
@@ -80,13 +84,14 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 // ── 构建域名查找表 ────────────────────────────────────
-// 将分组配置展开为 { hostname → { geo, cities, origin } } 的扁平字典
+// 将分组配置展开为 { hostname → { regions, geo, cities, origin } } 的扁平字典
 const DOMAIN_CONFIG = {};
 for (const group of DOMAIN_GROUPS) {
+  const regions = group.regions || [];
   const geo = group.geo || null;
   const cities = group.cities || DEFAULT_CITIES;
   for (const domain of group.domains) {
-    DOMAIN_CONFIG[domain] = { geo, cities, origin: group.origin };
+    DOMAIN_CONFIG[domain] = { regions, geo, cities, origin: group.origin };
   }
 }
 
@@ -96,6 +101,11 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const hostname = url.hostname;
+
+    // 0. 初始化 ip2region（从 KV 加载 xdb，冷启动仅一次）
+    if (env.IP2REGION) {
+      await initIpLookup(env.IP2REGION);
+    }
 
     // 1. 加载配置：环境变量优先，否则用代码内配置
     let config;
@@ -109,52 +119,60 @@ export default {
 
     // 2. 查找当前域名的地理配置和源站
     const domainCfg = config[hostname] || {};
+    const allowedRegions = domainCfg.regions || [];
     const geo = domainCfg.geo || null;
     const allowedCities = domainCfg.cities || DEFAULT_CITIES;
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
 
-    // 3. 城市为 ALL 时全部放行
-    if (allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL' && !geo) {
+    // 3. 城市为 ALL 且无省级/经纬度限制时全部放行
+    if (allowedRegions.length === 0 && !geo &&
+        allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL') {
       return proxyRequest(request, url, origin);
     }
 
     // 4. IP 地理判断
     const cf = request.cf || {};
-    const city = cf.city || '';
-    const region = cf.region || '';
-    const country = cf.country || '';
+    const clientIP = request.headers.get('CF-Connecting-IP') || '';
+    const loc = lookupIP(clientIP, cf);
+
+    // 用 ip2region 的省份/城市（更准），cf 的做兜底
+    const province = loc.province || loc.region;
+    const city = loc.city;
+    const country = loc.country;
 
     let isAllowed = false;
-    let denyReason = '';
+    const denyReasons = [];
 
-    // 优先：经纬度距离匹配
-    if (geo) {
-      const reqLat = parseFloat(cf.latitude);
-      const reqLon = parseFloat(cf.longitude);
+    // 4a. 省级匹配（ip2region 返回中文省名，同时兼容 CF 英文名）
+    if (allowedRegions.length > 0) {
+      isAllowed = allowedRegions.some(
+        r => province.toLowerCase() === r.toLowerCase() || loc.region.toLowerCase() === r.toLowerCase()
+      );
+      if (!isAllowed) denyReasons.push(`省份 ${province || '未知'} 不在允许列表 [${allowedRegions.join(', ')}]`);
+    }
+
+    // 4b. 经纬度距离匹配
+    if (!isAllowed && geo) {
+      const reqLat = parseFloat(loc.lat);
+      const reqLon = parseFloat(loc.lon);
       if (!isNaN(reqLat) && !isNaN(reqLon)) {
         const dist = haversineKm(geo.lat, geo.lon, reqLat, reqLon);
         isAllowed = dist <= geo.radiusKm;
-        if (!isAllowed) {
-          denyReason = `距允许区域中心 ${dist.toFixed(0)}km，超出 ${geo.radiusKm}km 限制`;
-        }
-      } else {
-        // 经纬度缺失时回退到城市名匹配
-        isAllowed = allowedCities.some(c => city.toLowerCase() === c.toLowerCase());
-        if (!isAllowed) denyReason = '经纬度缺失且城市名不匹配';
+        if (!isAllowed) denyReasons.push(`距允许区域中心 ${dist.toFixed(0)}km，超出 ${geo.radiusKm}km`);
       }
-    } else {
-      // 旧方式：城市名精确匹配
-      isAllowed = allowedCities.some(
-        c => city.toLowerCase() === c.toLowerCase()
-      );
-      if (!isAllowed) denyReason = '城市不在允许列表中';
+    }
+
+    // 4c. 城市名匹配（ip2region 的城市更准）
+    if (!isAllowed && allowedCities.length > 0 &&
+        !(allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL')) {
+      isAllowed = allowedCities.some(c => city.toLowerCase() === c.toLowerCase());
+      if (!isAllowed) denyReasons.push(`城市 ${city || '未知'} 不在允许列表 [${allowedCities.join(', ')}]`);
     }
 
     // 5. 非允许地区返回 403
     if (!isAllowed) {
-      const cfLat = cf.latitude || '';
-      const cfLon = cf.longitude || '';
-      return new Response(denyPage(city, region, country, denyReason, cfLat, cfLon), {
+      const reason = denyReasons.length > 0 ? denyReasons.join('；') : '不在允许区域';
+      return new Response(denyPage(city, province, country, reason, loc.lat, loc.lon, loc.source, loc.isp), {
         status: 403,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });

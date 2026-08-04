@@ -2,6 +2,14 @@ name = "city-gate"
 main = "worker.js"
 compatibility_date = "2024-12-01"
 
+# ── KV 绑定 ──────────────────────────────────────────
+# 存放 ip2region xdb 数据文件
+# 部署时 update-ip2region.js 脚本会自动查找/创建 KV namespace
+# 并将 id 写回此文件；CI 部署步骤也会自动注入 id
+[[kv_namespaces]]
+binding = "IP2REGION"
+id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
+
 # 路由配置 — 每个域名绑定到此 Worker，城市规则在 worker.js 的 DOMAIN_CONFIG 中按域名配置
 [[routes]]
 pattern = "sg.1189.dpdns.org/*"

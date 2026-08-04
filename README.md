@@ -3,139 +3,148 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '3c707888-94c8-42e0-abbf-9d15fc72e4ca'
-  PropagateID: '3c707888-94c8-42e0-abbf-9d15fc72e4ca'
-  ReservedCode1: '5ffc6d78-9534-43f2-8d7c-e94413ad186e'
-  ReservedCode2: '5ffc6d78-9534-43f2-8d7c-e94413ad186e'
+  ProduceID: '219df9b5-ff77-4afe-971f-d83bf82a35a3'
+  PropagateID: '219df9b5-ff77-4afe-971f-d83bf82a35a3'
+  ReservedCode1: '3464ffa0-9582-448a-a251-2e53c5eaef99'
+  ReservedCode2: '3464ffa0-9582-448a-a251-2e53c5eaef99'
 ---
 
 # city-gate
 
-基于 Cloudflare Workers 的城市 IP 访问限制网关。一个 Worker 支持多域名、多城市配置。
+基于 Cloudflare Workers 的 IP 访问限制网关。一个 Worker 支持多域名、多地区配置。
 
 ## 项目结构
 
 ```
 workers/
 ├── shared/
-│   └── deny-page.js    # 共享 403 页面模板
-├── city-gate/          # 城市访问网关
+│   ├── deny-page.js     # 共享 403 页面模板
+│   ├── ip2region.js     # ip2region xdb 查询器（Worker 适配版）
+│   └── ip-lookup.js     # IP 归属地统一封装层
+├── city-gate/           # 城市访问网关
 │   ├── worker.js
 │   └── wrangler.toml
-└── cxapk/              # APK 下载代理
+└── cxapk/               # APK 下载代理
     ├── worker.js
     └── wrangler.toml
+scripts/
+├── sync-cname.js        # DNS CNAME 同步脚本
+└── update-ip2region.js  # ip2region xdb 更新脚本
 ```
 
-## Workers
+## 地理匹配策略
 
-### city-gate — 城市访问网关
+三级匹配，满足任一即放行，精度递减：
 
-一个 Worker 服务所有域名，按源站分组配置，同组域名共享 cities 和 origin：
+| 优先级 | 策略 | 数据源 | 精度 |
+|--------|------|--------|------|
+| 1 | 省级匹配 | ip2region（KV+内存缓存） | 最高 |
+| 2 | 经纬度距离 | Cloudflare `request.cf` | 中等 |
+| 3 | 城市名匹配 | Cloudflare `request.cf` | 最低 |
+
+ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载到内存，后续查询纯内存操作（~0.01ms）。
+
+## 域名组配置
 
 ```js
-// 域名组 — 同组域名共享配置，新增域名往组里加即可
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
-    domains: [
-      'sg.1189.dpdns.org',
-      'sg.07170501.xyz',
-      'sg.bxg.dpdns.org',
-      'sg.zhaozg.dpdns.org',
-      'sg.zhaozg.cloudns.org',
-    ],
+    regions: ['浙江', '上海', 'Zhejiang', 'Shanghai'],  // 省级匹配（中英文兼容）
+    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 150 }, // 经纬度兜底
+    domains: ['sg.1189.dpdns.org', ...],
   },
-  // 不同源站/城市的新组：
-  // {
-  //   origin: 'https://bj.pages.dev',
-  //   cities: ['Beijing', 'Shanghai'],
-  //   domains: ['bj.example.com'],
-  // },
+  {
+    origin: 'https://bible-2o8.pages.dev',
+    cities: ['ALL'],  // 全部放行
+    domains: ['bible.zhaozg.dpdns.org', ...],
+  },
 ];
 ```
 
-### cxapk — APK 下载代理
+## 添加新域名
 
-带城市检查的 APK 下载代理，通过 URL 路径段动态替换源站前缀。
-
-## 添加新域名/城市
-
-1. 在 `worker.js` 的 `DOMAIN_GROUPS` 中添加域名（同组域名加到 `domains` 数组，新源站则新建组）
-2. 在 `wrangler.toml` 中添加路由：
-   ```toml
-   [[routes]]
-   pattern = "bj.example.com/*"
-   zone_name = "example.com"
-   ```
+1. 在 `worker.js` 的 `DOMAIN_GROUPS` 中添加域名
+2. 在 `wrangler.toml` 中添加路由
 3. 部署即可
 
 ## 部署
+
+### 自动部署（推荐）
+
+推送 master 分支自动触发 GitHub Actions：
+- 自动更新 ip2region xdb 到 KV
+- 自动部署全部 Worker
+
+### 手动部署
 
 ```bash
 cd workers/city-gate
 npx wrangler deploy
 ```
 
-推送 master 分支会自动部署全部 Worker（GitHub Actions）。
+### 首次部署：配置 KV
+
+无需手动创建 KV namespace。`scripts/update-ip2region.js` 脚本会自动：
+1. 通过 Cloudflare API 查找名为 `city-gate-IP2REGION` 的 KV namespace
+2. 如不存在则自动创建
+3. 将 namespace id 写回 `wrangler.toml`
+4. 下载并上传最新 xdb 数据到 KV
+
+```bash
+# 一键初始化（自动创建 KV + 上传 xdb）
+CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
+  node scripts/update-ip2region.js
+```
+
+> 如果已有 KV namespace，可通过 `KV_NAMESPACE_ID` 环境变量指定，脚本会跳过创建步骤。
+
+### 更新 ip2region 数据
+
+```bash
+# 自动：检查 GitHub 最新 release 并更新
+CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
+  node scripts/update-ip2region.js
+
+# 已有 KV namespace 时指定 id
+CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
+  KV_NAMESPACE_ID=xxx node scripts/update-ip2region.js
+
+# 指定版本
+IP2REGION_VERSION=3.5.1 CLOUDFLARE_API_TOKEN=xxx \
+  CLOUDFLARE_ACCOUNT_ID=xxx \
+  node scripts/update-ip2region.js
+```
+
+## GitHub Secrets
+
+| Secret | 说明 |
+|--------|------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（需 Workers、KV、DNS、Account Settings 权限） |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账户 ID |
+| `KV_IP2REGION_NAMESPACE_ID` | (可选) ip2region KV namespace ID，不配置则脚本自动创建 |
 
 ## DNS CNAME 同步
 
-`scripts/sync-cname.js` 脚本自动管理 Cloudflare DNS 中的 CNAME 记录，将指定 zone 下的域名指向优选域名。
-
-### 当前配置
-
-| Zone | 域名 | CNAME 目标 |
-|------|------|-----------|
-| `zhaozg.dpdns.org` | sg / books / bible / cx | `saas.sin.fan` |
-
-### 脚本逻辑
-
-对每个配置的域名：
-- 已有 CNAME 且目标正确 → 跳过
-- 已有 CNAME 但目标不同 → 删除旧记录，新建指向优选域名
-- 无 CNAME → 新建记录
+`scripts/sync-cname.js` 脚本自动管理 Cloudflare DNS 中的 CNAME 记录。
 
 ### 本地运行
 
 ```bash
-# 预览模式（不执行修改）
+# 预览模式
 CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/sync-cname.js
 
 # 实际执行
 CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
 ```
 
-### GitHub Actions
-
-- **手动触发**：Actions → 同步 DNS CNAME → Run workflow（可选预览模式）
-- **自动触发**：`scripts/sync-cname.js` 文件变更推送到 master 时自动同步
-- 需要在仓库 Secrets 中配置 `CLOUDFLARE_API_TOKEN`（需 Zone:DNS:Edit 权限）
-
-### 新增优选域名
-
-编辑 `scripts/sync-cname.js` 中的 `CNAME_MAP` 数组：
-
-```js
-const CNAME_MAP = [
-  {
-    zoneName: 'zhaozg.dpdns.org',
-    target: 'saas.sin.fan',
-    names: ['sg', 'books', 'bible', 'cx'],
-  },
-  // 新增优选域名示例：
-  // {
-  //   zoneName: '1189.dpdns.org',
-  //   target: 'preferred2.example.com',
-  //   names: ['sg', 'books', 'bible'],
-  // },
-];
-```
-
 ## 环境变量
 
 | 变量 | Worker | 说明 |
 |------|--------|------|
-| `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串，覆盖代码内 DOMAIN_CONFIG |
+| `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串，覆盖代码内配置 |
 | `PAGES_ORIGIN` | city-gate | 兜底源站地址 |
-| `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（不配置则全部允许） |
+| `ALLOWED_REGIONS` | cxapk | 允许的省份，逗号分隔 |
+| `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（向下兼容） |
+| `GEO_CENTER` | cxapk | 经纬度中心，格式 `lat,lon` |
+| `GEO_RADIUS_KM` | cxapk | 允许半径(km)，默认 150 |

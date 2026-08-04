@@ -1,22 +1,29 @@
 /**
  * 共享 403 页面模板
  * @param {string} city
- * @param {string} region
+ * @param {string} province
  * @param {string} country
- * @param {string} reason — 拒绝原因（可选）
- * @param {string} lat — Cloudflare 返回的纬度（可选）
- * @param {string} lon — Cloudflare 返回的经度（可选）
+ * @param {string} reason — 拒绝原因
+ * @param {string} lat — 纬度
+ * @param {string} lon — 经度
+ * @param {string} source — 数据来源：ip2region / cf
+ * @param {string} isp — 运营商
  * @returns {string} HTML
  */
-export function denyPage(city, region, country, reason = '', lat = '', lon = '') {
-  const locationText = [
-    city || '未知',
-    region,
-    country
-  ].filter(Boolean).join('，');
+export function denyPage(city, province, country, reason = '', lat = '', lon = '', source = '', isp = '') {
+  const locationParts = [city || '未知城市', province, country].filter(Boolean);
+  const locationText = locationParts.join('，');
 
   const coordLine = (lat && lon)
-    ? `<div class="coord">经纬度：${lat}, ${lon}</div>`
+    ? `<div class="detail">经纬度：${lat}, ${lon}</div>`
+    : '';
+
+  const sourceLine = source
+    ? `<div class="detail">数据来源：${source === 'ip2region' ? 'ip2region（高精度）' : 'Cloudflare GeoIP'}</div>`
+    : '';
+
+  const ispLine = isp
+    ? `<div class="detail">运营商：${isp}</div>`
     : '';
 
   const reasonLine = reason
@@ -58,12 +65,16 @@ export function denyPage(city, region, country, reason = '', lat = '', lon = '')
       font-size: 13px;
       line-height: 1.6;
     }
-    .coord, .reason {
-      margin-top: 6px;
+    .detail {
+      margin-top: 4px;
       opacity: 0.7;
       font-size: 12px;
     }
-    .reason { color: #ffd6a0; }
+    .reason {
+      margin-top: 8px;
+      color: #ffd6a0;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -72,8 +83,10 @@ export function denyPage(city, region, country, reason = '', lat = '', lon = '')
     <h1>访问受限</h1>
     <p>您所在的地区暂不支持访问<br>如有需要请联系管理员</p>
     <div class="info">
-      您的 IP 归属地：${locationText}
+      IP 归属地：${locationText}
+      ${ispLine}
       ${coordLine}
+      ${sourceLine}
       ${reasonLine}
     </div>
   </div>

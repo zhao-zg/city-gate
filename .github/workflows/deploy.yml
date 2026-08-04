@@ -9,10 +9,54 @@ on:
         description: '指定部署的 Worker（留空则部署全部）'
         required: false
         type: string
+      update_xdb:
+        description: '更新 ip2region xdb（1=是，0=跳过）'
+        required: false
+        type: string
+        default: '1'
+  schedule:
+    # 每周一 UTC 0:00 自动检查 xdb 更新
+    - cron: '0 0 * * 1'
 
 jobs:
+  # ── Job 1：检查并更新 ip2region xdb ──────────────────
+  update-xdb:
+    runs-on: ubuntu-latest
+    # 手动指定跳过时不执行；定时/推送时默认执行
+    if: ${{ github.event.inputs.update_xdb != '0' }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 更新 ip2region xdb 到 KV（自动创建 namespace）
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_NAMESPACE_ID: ${{ secrets.KV_IP2REGION_NAMESPACE_ID }}
+        run: node scripts/update-ip2region.js
+
+      - name: 从 wrangler.toml 读取 KV namespace id
+        id: kv-id
+        run: |
+          KV_ID=$(grep -A1 'binding = "IP2REGION"' workers/city-gate/wrangler.toml | grep 'id =' | sed 's/.*id = "\(.*\)".*/\1/')
+          echo "id=$KV_ID" >> "$GITHUB_OUTPUT"
+          echo "KV namespace id: $KV_ID"
+
+  # ── Job 2：部署 Workers（仅 push 和手动触发时执行）────
   deploy:
     runs-on: ubuntu-latest
+    needs: [update-xdb]
+    # xdb 更新成功或被跳过时才部署；定时任务不需要部署
+    if: >-
+      ${{
+        (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+        (needs.update-xdb.result == 'success' || needs.update-xdb.result == 'skipped')
+      }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -25,17 +69,31 @@ jobs:
       - name: 安装 wrangler
         run: npm install -g wrangler
 
+      - name: 注入 KV namespace ID
+        run: |
+          # 优先使用 update-xdb job 通过 API 自动获取/创建的 KV namespace id
+          KV_ID="${{ needs.update-xdb.outputs.kv_namespace_id }}"
+          if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
+            sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" workers/city-gate/wrangler.toml
+            echo "已注入脚本自动获取的 KV namespace id: $KV_ID"
+          elif [ -n "${{ secrets.KV_IP2REGION_NAMESPACE_ID }}" ]; then
+            sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/${{ secrets.KV_IP2REGION_NAMESPACE_ID }}/g" \
+              workers/city-gate/wrangler.toml
+            echo "已从 secret 注入 KV namespace ID"
+          else
+            echo "警告: 未配置 KV namespace id，Worker 可能无法正常工作"
+          fi
+
       - name: 确定要部署的 Workers
         id: workers
         run: |
           if [ -n "${{ github.event.inputs.worker }}" ]; then
             WORKERS="${{ github.event.inputs.worker }}"
           else
-            # 自动发现 workers/ 下所有包含 wrangler.toml 的目录
             WORKERS=$(find workers -name "wrangler.toml" -exec dirname {} \; | sed 's|workers/||' | sort | tr '\n' ' ')
           fi
           echo "list=$WORKERS" >> "$GITHUB_OUTPUT"
-          echo "📦 将部署: $WORKERS"
+          echo "将部署: $WORKERS"
 
       - name: 部署 Workers
         env:
@@ -43,7 +101,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           for worker in ${{ steps.workers.outputs.list }}; do
-            echo "🚀 部署 $worker ..."
+            echo "部署 $worker ..."
             if (cd "workers/$worker" && wrangler deploy); then
               echo "✓ $worker 部署成功"
             else

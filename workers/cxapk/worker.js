@@ -2,15 +2,17 @@
  * Cloudflare Worker — CX APK 下载代理（带地理检查）
  *
  * 根据 URL 路径段动态替换源站前缀，逐个尝试获取 version.json 并代理 APK 文件。
- * 支持经纬度距离匹配（精度高）和城市名匹配（兼容旧配置）。
+ * 三级地理匹配策略：省级（最准）> 经纬度距离 > 城市名，满足任一即放行。
  *
  * 环境变量:
- *   ALLOWED_CITIES — 允许的城市，逗号分隔（不配置则全部允许）
- *   GEO_CENTER     — 允许区域中心，格式 "lat,lon"（如 "30.2741,120.1551"）
- *   GEO_RADIUS_KM  — 允许半径(km)，默认 150
+ *   ALLOWED_REGIONS — 允许的省份，逗号分隔（如 "Zhejiang,Shanghai"）
+ *   ALLOWED_CITIES  — 允许的城市，逗号分隔（向下兼容）
+ *   GEO_CENTER      — 允许区域中心，格式 "lat,lon"（如 "30.2741,120.1551"）
+ *   GEO_RADIUS_KM   — 允许半径(km)，默认 150
  */
 
 import { denyPage } from '../shared/deny-page.js';
+import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // ── Haversine 距离计算（km）──────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -33,42 +35,58 @@ const FALLBACK_BASES = [
 
 export default {
   async fetch(request, env) {
-    // ── 地理检查 ──
-    const allowedCities = (env.ALLOWED_CITIES || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+    // 0. 初始化 ip2region（从 KV 加载 xdb，冷启动仅一次）
+    if (env.IP2REGION) {
+      await initIpLookup(env.IP2REGION);
+    }
 
+    // ── 地理检查（三级策略）──
+    const allowedRegions = (env.ALLOWED_REGIONS || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const allowedCities = (env.ALLOWED_CITIES || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
     const geoCenter = (env.GEO_CENTER || '').split(',').map(Number);
     const geoRadius = parseFloat(env.GEO_RADIUS_KM) || 150;
     const hasGeo = geoCenter.length === 2 && !isNaN(geoCenter[0]) && !isNaN(geoCenter[1]);
 
-    if (allowedCities.length > 0 || hasGeo) {
+    if (allowedRegions.length > 0 || allowedCities.length > 0 || hasGeo) {
       const cf = request.cf || {};
-      const city = cf.city || '';
-      let isAllowed = false;
-      let denyReason = '';
+      const clientIP = request.headers.get('CF-Connecting-IP') || '';
+      const loc = lookupIP(clientIP, cf);
 
-      // 优先：经纬度距离匹配
-      if (hasGeo) {
-        const reqLat = parseFloat(cf.latitude);
-        const reqLon = parseFloat(cf.longitude);
+      const province = loc.province || loc.region;
+      const city = loc.city;
+      let isAllowed = false;
+      const denyReasons = [];
+
+      // 1. 省级匹配（ip2region 中文省名 + CF 英文名同时匹配）
+      if (allowedRegions.length > 0) {
+        isAllowed = allowedRegions.some(
+          r => province.toLowerCase() === r.toLowerCase() || loc.region.toLowerCase() === r.toLowerCase()
+        );
+        if (!isAllowed) denyReasons.push(`省份 ${province || '未知'} 不在允许列表 [${allowedRegions.join(', ')}]`);
+      }
+
+      // 2. 经纬度距离匹配
+      if (!isAllowed && hasGeo) {
+        const reqLat = parseFloat(loc.lat);
+        const reqLon = parseFloat(loc.lon);
         if (!isNaN(reqLat) && !isNaN(reqLon)) {
           const dist = haversineKm(geoCenter[0], geoCenter[1], reqLat, reqLon);
           isAllowed = dist <= geoRadius;
-          if (!isAllowed) denyReason = `距允许区域中心 ${dist.toFixed(0)}km，超出 ${geoRadius}km 限制`;
-        } else if (allowedCities.length > 0) {
-          // 经纬度缺失时回退到城市名匹配
-          isAllowed = allowedCities.some(c => city.toLowerCase() === c.toLowerCase());
-          if (!isAllowed) denyReason = '经纬度缺失且城市名不匹配';
+          if (!isAllowed) denyReasons.push(`距允许区域中心 ${dist.toFixed(0)}km，超出 ${geoRadius}km`);
         }
-      } else if (allowedCities.length > 0) {
+      }
+
+      // 3. 城市名匹配
+      if (!isAllowed && allowedCities.length > 0) {
         isAllowed = allowedCities.some(c => city.toLowerCase() === c.toLowerCase());
-        if (!isAllowed) denyReason = '城市不在允许列表中';
+        if (!isAllowed) denyReasons.push(`城市 ${city || '未知'} 不在允许列表 [${allowedCities.join(', ')}]`);
       }
 
       if (!isAllowed) {
-        return new Response(denyPage(city, cf.region, cf.country, denyReason, cf.latitude || '', cf.longitude || ''), {
+        const reason = denyReasons.length > 0 ? denyReasons.join('；') : '不在允许区域';
+        return new Response(denyPage(city, province, loc.country, reason, loc.lat, loc.lon, loc.source, loc.isp), {
           status: 403,
           headers: { 'Content-Type': 'text/html; charset=utf-8' },
         });
