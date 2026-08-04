@@ -4,7 +4,9 @@
  * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
  * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
  *
- * 地理匹配策略：城市级匹配（ip2region 精确到城市，由运营商IP段决定）
+ * 地理匹配策略：
+ * - IPv4 客户端：ip2region 城市级精确匹配（如 杭州）
+ * - IPv6 客户端：ip2region 无法查询，降级到 CF 省级代码匹配（如 浙江）
  */
 
 import { denyPage } from '../shared/deny-page.js';
@@ -12,11 +14,13 @@ import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // ── 域名组配置 ────────────────────────────────────────
 // cities: 城市名（支持中文如 杭州、上海，和英文如 Hangzhou、Shanghai）
+// provinces: 省份名（IPv6 降级时使用省级匹配）
 // 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
     cities: ['杭州', 'Hangzhou'],
+    provinces: ['浙江', 'Zhejiang'],
     domains: [
       'sg.1189.dpdns.org',
       'sg.07170501.xyz',
@@ -28,6 +32,7 @@ const DOMAIN_GROUPS = [
   {
     origin: 'https://books-89r.pages.dev',
     cities: ['杭州', 'Hangzhou'],
+    provinces: ['浙江', 'Zhejiang'],
     domains: [
       'books.07170501.xyz',
       'books.1189.dpdns.org',
@@ -63,8 +68,9 @@ const DOMAIN_GROUPS = [
 const DOMAIN_CONFIG = {};
 for (const group of DOMAIN_GROUPS) {
   const cities = group.cities || [];
+  const provinces = group.provinces || [];
   for (const domain of group.domains) {
-    DOMAIN_CONFIG[domain] = { cities, origin: group.origin };
+    DOMAIN_CONFIG[domain] = { cities, provinces, origin: group.origin };
   }
 }
 
@@ -93,6 +99,7 @@ export default {
     // 2. 查找当前域名的地理配置和源站
     const domainCfg = config[hostname] || {};
     const allowedCities = domainCfg.cities || [];
+    const allowedProvinces = domainCfg.provinces || [];
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
 
     // 3. cities 包含 ALL 时全部放行
@@ -108,22 +115,33 @@ export default {
     // 5. IP 地理判断
     const cf = request.cf || {};
     const clientIP = request.headers.get('CF-Connecting-IP') || '';
+    const isIPv6 = clientIP.includes(':');
     const loc = lookupIP(clientIP, cf);
 
-    const city = loc.city;
-    const province = loc.province;
+    let isAllowed = false;
+    let matchLevel = '';
 
-    // 城市级匹配（ip2region 已去除"市"后缀，配置中也用无后缀城市名）
-    const isAllowed = allowedCities.some(
-      c => city.toLowerCase() === c.toLowerCase()
-    );
+    if (loc.source === 'ip2region' && loc.city) {
+      // IPv4 + ip2region：城市级精确匹配
+      isAllowed = allowedCities.some(
+        c => loc.city.toLowerCase() === c.toLowerCase()
+      );
+      matchLevel = 'city';
+    }
+
+    if (!isAllowed && loc.province) {
+      // IPv6 或 ip2region 无结果时：省级匹配（CF 的 region 省级代码可靠）
+      isAllowed = allowedProvinces.some(
+        p => loc.province.toLowerCase() === p.toLowerCase()
+      );
+      if (isAllowed) matchLevel = 'province';
+    }
 
     // 6. 非允许地区返回 403
     if (!isAllowed) {
-      const reason = `城市 ${city || '未知'}（${province || '未知省份'}）不在允许列表 [${allowedCities.join(', ')}]`;
-      // 调试信息：同时显示 ip2region 和 CF 的判断结果
-      const debugInfo = `IP: ${clientIP} | ip2region: ${city}/${province} | CF: ${cf.city || '?'}/${cf.region || '?'}`;
-      return new Response(denyPage(city, province, loc.country, reason, loc.source, loc.isp, debugInfo), {
+      const reason = `${matchLevel ? '省级' : '城市'}匹配失败：${loc.city || '未知城市'}/${loc.province || '未知省份'}不在允许列表 [${allowedCities.join(', ')}|${allowedProvinces.join(', ')}]`;
+      const debugInfo = `IP: ${clientIP} | ip2region: ${loc.city}/${loc.province} | CF: ${cf.city || '?'}/${cf.region || '?'} | 匹配级别: ${matchLevel || 'none'}`;
+      return new Response(denyPage(loc.city, loc.province, loc.country, reason, loc.source, loc.isp, debugInfo), {
         status: 403,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });

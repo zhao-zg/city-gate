@@ -2,10 +2,13 @@
  * Cloudflare Worker — CX APK 下载代理（带地理检查）
  *
  * 根据 URL 路径段动态替换源站前缀，逐个尝试获取 version.json 并代理 APK 文件。
- * 地理匹配策略：城市级匹配（ip2region 精确到城市）
+ * 地理匹配策略：
+ * - IPv4：ip2region 城市级精确匹配
+ * - IPv6：降级到 CF 省级代码匹配
  *
  * 环境变量:
  *   ALLOWED_CITIES — 允许的城市，逗号分隔（如 "杭州,Hangzhou"）
+ *   ALLOWED_PROVINCES — 允许的省份，逗号分隔（如 "浙江,Zhejiang"）
  */
 
 import { denyPage } from '../shared/deny-page.js';
@@ -29,21 +32,39 @@ export default {
     // ── 地理检查 ──
     const allowedCities = (env.ALLOWED_CITIES || '')
       .split(',').map(s => s.trim()).filter(Boolean);
+    const allowedProvinces = (env.ALLOWED_PROVINCES || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
 
     // 包含 ALL 或未配置时跳过检查
     if (allowedCities.length > 0 && !allowedCities.some(c => c.toUpperCase() === 'ALL')) {
       const cf = request.cf || {};
       const clientIP = request.headers.get('CF-Connecting-IP') || '';
+      const isIPv6 = clientIP.includes(':');
       const loc = lookupIP(clientIP, cf);
 
-      const city = loc.city;
-      const isAllowed = allowedCities.some(
-        c => city.toLowerCase() === c.toLowerCase()
-      );
+      let isAllowed = false;
+      let matchLevel = '';
+
+      // 城市级精确匹配（IPv4 + ip2region）
+      if (loc.source === 'ip2region' && loc.city) {
+        isAllowed = allowedCities.some(
+          c => loc.city.toLowerCase() === c.toLowerCase()
+        );
+        if (isAllowed) matchLevel = 'city';
+      }
+
+      // 省级匹配（IPv6 降级或城市级未命中时）
+      if (!isAllowed && loc.province) {
+        isAllowed = allowedProvinces.some(
+          p => loc.province.toLowerCase() === p.toLowerCase()
+        );
+        if (isAllowed) matchLevel = 'province';
+      }
 
       if (!isAllowed) {
-        const reason = `城市 ${city || '未知'}（${loc.province || '未知省份'}）不在允许列表 [${allowedCities.join(', ')}]`;
-        return new Response(denyPage(city, loc.province, loc.country, reason, loc.source, loc.isp), {
+        const reason = `${matchLevel ? '省级' : '城市'}匹配失败：${loc.city || '未知城市'}/${loc.province || '未知省份'}不在允许列表 [${allowedCities.join(', ')}|${allowedProvinces.join(', ')}]`;
+        const debugInfo = `IP: ${clientIP} | ip2region: ${loc.city}/${loc.province} | CF: ${cf.city || '?'}/${cf.region || '?'} | 匹配级别: ${matchLevel || 'none'}`;
+        return new Response(denyPage(loc.city, loc.province, loc.country, reason, loc.source, loc.isp, debugInfo), {
           status: 403,
           headers: { 'Content-Type': 'text/html; charset=utf-8' },
         });
