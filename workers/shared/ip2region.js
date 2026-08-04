@@ -200,43 +200,85 @@ class Searcher {
 
 // ── 全局单例管理 ──────────────────────────────────────
 
-let _searcher = null;
-let _loading = null;
+let _searcherV4 = null;
+let _searcherV6 = null;
+let _loadingV4 = null;
+let _loadingV6 = null;
 
 /**
  * 初始化 ip2region 查询器（从 KV 加载 xdb 到内存）
- * 冷启动后首次调用会从 KV 读取，后续复用内存缓存。
+ * 支持 v4 和 v6 双 xdb：v4 整体存储，v6 分片存储（因 36MB 超 KV 27MiB 限制）
  *
  * @param {KVNamespace} kv - Cloudflare KV 绑定
- * @param {string} key - xdb 文件在 KV 中的 key，默认 'ip2region_v4.xdb'
- * @returns {Promise<Searcher>}
+ * @param {Object} [opts]
+ * @param {string} [opts.v4Key='ip2region_v4.xdb'] - v4 xdb 在 KV 中的 key
+ * @param {string[]} [opts.v6Keys] - v6 xdb 分片 key 列表，如 ['ip2region_v6_part1', 'ip2region_v6_part2']
+ * @param {boolean} [opts.loadV6=true] - 是否加载 v6 xdb（v6 不存在时静默跳过）
  */
-export async function initIp2Region(kv, key = 'ip2region_v4.xdb') {
-  if (_searcher) return _searcher;
+export async function initIp2Region(kv, opts = {}) {
+  const v4Key = opts.v4Key || 'ip2region_v4.xdb';
+  const v6Keys = opts.v6Keys || ['ip2region_v6_part1', 'ip2region_v6_part2'];
+  const loadV6 = opts.loadV6 !== false;
 
-  // 防并发：多个请求同时触发时只加载一次
-  if (_loading) return _loading;
+  // 加载 v4（必须）
+  if (!_searcherV4 && !_loadingV4) {
+    _loadingV4 = (async () => {
+      const value = await kv.get(v4Key, 'arrayBuffer');
+      if (!value) throw new Error(`ip2region v4 xdb not found in KV: ${v4Key}`);
+      _searcherV4 = new Searcher(value);
+      _loadingV4 = null;
+      return _searcherV4;
+    })();
+  }
 
-  _loading = (async () => {
-    const value = await kv.get(key, 'arrayBuffer');
-    if (!value) throw new Error(`ip2region xdb not found in KV: ${key}`);
-    _searcher = new Searcher(value);
-    _loading = null;
-    return _searcher;
-  })();
+  // 加载 v6（可选，分片拼接）
+  if (loadV6 && !_searcherV6 && !_loadingV6) {
+    _loadingV6 = (async () => {
+      try {
+        const parts = await Promise.all(
+          v6Keys.map(key => kv.get(key, 'arrayBuffer'))
+        );
+        // 任一分片缺失则跳过 v6
+        if (parts.some(p => !p)) {
+          console.warn('ip2region v6 xdb 分片不完整，跳过 v6 查询');
+          _loadingV6 = null;
+          return null;
+        }
+        // 拼接分片
+        const totalLen = parts.reduce((sum, p) => sum + p.byteLength, 0);
+        const combined = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const part of parts) {
+          combined.set(new Uint8Array(part), offset);
+          offset += part.byteLength;
+        }
+        _searcherV6 = new Searcher(combined.buffer);
+        _loadingV6 = null;
+        console.log(`ip2region v6 xdb 加载成功 (${(totalLen / 1024 / 1024).toFixed(1)} MB)`);
+        return _searcherV6;
+      } catch (e) {
+        console.warn(`ip2region v6 xdb 加载失败: ${e.message}`);
+        _loadingV6 = null;
+        return null;
+      }
+    })();
+  }
 
-  return _loading;
+  await _loadingV4;
+  if (_loadingV6) await _loadingV6;
 }
 
 /**
- * 查询 IP 归属地
+ * 查询 IP 归属地（自动选择 v4/v6 Searcher）
  * @param {string} ip - IP 地址
  * @returns {string|null} - 格式（v3）：国家|省份|城市|运营商|国家代码，未初始化返回 null
  */
 export function searchIp2Region(ip) {
-  if (!_searcher) return null;
+  const isV6 = ip.includes(':');
+  const searcher = isV6 ? _searcherV6 : _searcherV4;
+  if (!searcher) return null;
   try {
-    return _searcher.search(ip);
+    return searcher.search(ip);
   } catch {
     return null;
   }

@@ -4,9 +4,9 @@
  * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
  * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
  *
- * 地理匹配策略：
- * - IPv4 客户端：ip2region 城市级精确匹配（如 杭州）
- * - IPv6 客户端：ip2region 无法查询，降级到 CF 省级代码匹配（如 浙江）
+ * 地理匹配策略（IPv4/IPv6 均支持）：
+ * - ip2region 可用时：城市级精确匹配（如 杭州）
+ * - ip2region 不可用时：降级到 CF 省级代码匹配（如 浙江）
  */
 
 import { denyPage } from '../shared/deny-page.js';
@@ -14,7 +14,7 @@ import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // ── 域名组配置 ────────────────────────────────────────
 // cities: 城市名（支持中文如 杭州、上海，和英文如 Hangzhou、Shanghai）
-// provinces: 省份名（IPv6 降级时使用省级匹配）
+// provinces: 省份名（ip2region 不可用时降级使用省级匹配）
 // 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
 const DOMAIN_GROUPS = [
   {
@@ -115,22 +115,21 @@ export default {
     // 5. IP 地理判断
     const cf = request.cf || {};
     const clientIP = request.headers.get('CF-Connecting-IP') || '';
-    const isIPv6 = clientIP.includes(':');
     const loc = lookupIP(clientIP, cf);
 
     let isAllowed = false;
     let matchLevel = '';
 
     if (loc.source === 'ip2region' && loc.city) {
-      // IPv4 + ip2region：城市级精确匹配
+      // ip2region 城市级精确匹配（IPv4/IPv6 均支持）
       isAllowed = allowedCities.some(
         c => loc.city.toLowerCase() === c.toLowerCase()
       );
-      matchLevel = 'city';
+      if (isAllowed) matchLevel = 'city';
     }
 
     if (!isAllowed && loc.province) {
-      // IPv6 或 ip2region 无结果时：省级匹配（CF 的 region 省级代码可靠）
+      // ip2region 不可用时降级到省级匹配（CF 的 region 省级代码可靠）
       isAllowed = allowedProvinces.some(
         p => loc.province.toLowerCase() === p.toLowerCase()
       );

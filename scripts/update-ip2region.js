@@ -2,8 +2,12 @@
 /**
  * ip2region xdb 更新脚本
  *
- * 从 ip2region GitHub Release 下载最新 xdb 文件，上传到 Cloudflare KV。
- * 支持版本检测：如果 KV 中已有最新版本则跳过。
+ * 从 ip2region GitHub Release 下载最新 v4 和 v6 xdb 文件，上传到 Cloudflare KV。
+ * v4 xdb 整体上传；v6 xdb 因 36MB 超 KV 27MiB 限制，自动分片上传。
+ *
+ * 分片策略：将 v6 xdb 拆成 2 个 ~18MB 的 KV key：
+ *   - ip2region_v6_part1
+ *   - ip2region_v6_part2
  *
  * 自动 KV namespace 管理：
  *   - 如果未指定 KV_NAMESPACE_ID，脚本会通过 Cloudflare API 查找或创建
@@ -16,6 +20,7 @@
  *   KV_NAMESPACE_ID       - (可选) KV namespace ID，不提供则自动查找/创建
  *   IP2REGION_VERSION     - (可选) 指定版本号，默认取最新 release
  *   WRANGLER_TOML_PATH    - (可选) wrangler.toml 路径，默认 workers/city-gate/wrangler.toml
+ *   SKIP_V6              - (可选) 设为 1 跳过 v6 xdb 下载和上传
  *
  * 用法：
  *   node scripts/update-ip2region.js
@@ -26,12 +31,16 @@
 const path = require('path');
 const fs = require('fs');
 
-const XDB_KEY = 'ip2region_v4.xdb';
+const V4_KEY = 'ip2region_v4.xdb';
+const V6_KEYS = ['ip2region_v6_part1', 'ip2region_v6_part2'];
 const VERSION_KEY = 'ip2region_version';
 const GITHUB_OWNER = 'lionsoul2014';
 const GITHUB_REPO = 'ip2region';
 const KV_NAMESPACE_TITLE = 'city-gate-IP2REGION';
 const KV_PLACEHOLDER = 'PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID';
+
+// KV 单 value 最大 25MiB（留 2MiB 余量，官方限制 27MiB）
+const KV_MAX_PART_SIZE = 25 * 1024 * 1024;
 
 // ── 工具函数 ──────────────────────────────────────────
 
@@ -162,22 +171,22 @@ async function getLatestRelease() {
   };
 }
 
-function findXdbAsset(assets) {
-  for (const pattern of [/ip2region\.xdb/, /ip2region_v4\.xdb/, /ipv4.*\.xdb/]) {
-    const found = assets.find(a => pattern.test(a.name) && a.name.endsWith('.xdb'));
+function findXdbAsset(assets, pattern) {
+  for (const p of pattern) {
+    const found = assets.find(a => p.test(a.name) && a.name.endsWith('.xdb'));
     if (found) return found;
   }
   return null;
 }
 
-async function downloadXdb(downloadUrl) {
-  console.log(`  下载: ${downloadUrl}`);
+async function downloadXdb(downloadUrl, label) {
+  console.log(`  下载 ${label}: ${downloadUrl}`);
   const res = await fetch(downloadUrl, {
     headers: { 'User-Agent': 'city-gate-update-script' },
   });
-  if (!res.ok) throw new Error(`下载失败: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`下载 ${label} 失败: HTTP ${res.status}`);
   const buffer = await res.arrayBuffer();
-  console.log(`  大小: ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`  ${label} 大小: ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB`);
   return buffer;
 }
 
@@ -196,7 +205,6 @@ async function putKvValue(namespaceId, key, value, metadata = {}) {
   const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
 
   // 对于二进制大文件（如 xdb），直接用 PUT body 传输，避免 FormData base64 膨胀
-  // metadata 通过 URL 参数传递
   if (value instanceof Uint8Array) {
     const metaParam = Object.keys(metadata).length > 0
       ? `&metadata=${encodeURIComponent(JSON.stringify(metadata))}`
@@ -211,8 +219,9 @@ async function putKvValue(namespaceId, key, value, metadata = {}) {
     });
     if (!res.ok) {
       const err = await res.text();
-      throw new Error(`KV 写入失败: HTTP ${res.status} ${err}`);
+      throw new Error(`KV 写入 ${key} 失败: HTTP ${res.status} ${err}`);
     }
+    console.log(`  KV 写入成功: ${key} (${(value.byteLength / 1024 / 1024).toFixed(1)} MB)`);
     return;
   }
 
@@ -228,14 +237,48 @@ async function putKvValue(namespaceId, key, value, metadata = {}) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`KV 写入失败: HTTP ${res.status} ${err}`);
+    throw new Error(`KV 写入 ${key} 失败: HTTP ${res.status} ${err}`);
+  }
+}
+
+/**
+ * 将大 ArrayBuffer 分片上传到 KV
+ * @param {string} namespaceId
+ * @param {string[]} keys - 分片 KV key 列表
+ * @param {ArrayBuffer} buffer - 完整 xdb 数据
+ */
+async function putShardedXdb(namespaceId, keys, buffer) {
+  const totalSize = buffer.byteLength;
+  const partSize = Math.ceil(totalSize / keys.length);
+
+  // 确保每个分片不超过 KV 限制
+  if (partSize > KV_MAX_PART_SIZE) {
+    // 需要更多分片
+    const neededParts = Math.ceil(totalSize / KV_MAX_PART_SIZE);
+    throw new Error(
+      `v6 xdb (${(totalSize / 1024 / 1024).toFixed(1)} MB) 需要至少 ${neededParts} 个分片，` +
+      `但只提供了 ${keys.length} 个 key。请增加 V6_KEYS 数量。`
+    );
+  }
+
+  const data = new Uint8Array(buffer);
+  for (let i = 0; i < keys.length; i++) {
+    const start = i * partSize;
+    const end = Math.min(start + partSize, totalSize);
+    const chunk = data.slice(start, end);
+    console.log(`  分片 ${i + 1}/${keys.length}: ${keys[i]} (${(chunk.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+    await putKvValue(namespaceId, keys[i], chunk, {
+      part: i + 1,
+      total_parts: keys.length,
+      total_size: totalSize,
+    });
   }
 }
 
 // ── 主流程 ────────────────────────────────────────────
 
 async function main() {
-  // 必需环境变量（不再要求 KV_NAMESPACE_ID）
+  // 必需环境变量
   const requiredEnvs = ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'];
   for (const env of requiredEnvs) {
     if (!process.env[env]) {
@@ -244,11 +287,12 @@ async function main() {
     }
   }
 
+  const skipV6 = process.env.SKIP_V6 === '1';
+
   // 1. 确保 KV namespace 存在
   const namespaceId = await ensureKvNamespace();
 
   // 2. 如果是通过环境变量指定的 id，检查 wrangler.toml 是否需要更新
-  //    如果是自动查找/创建的，始终尝试写回 wrangler.toml
   const tomlPath = process.env.WRANGLER_TOML_PATH
     || path.resolve(__dirname, '..', 'workers', 'city-gate', 'wrangler.toml');
   if (fs.existsSync(tomlPath)) {
@@ -266,23 +310,30 @@ async function main() {
   const specifiedVersion = process.env.IP2REGION_VERSION;
 
   // 3. 获取最新版本
-  let releaseTag, xdbUrl;
+  let releaseTag, v4Url, v6Url;
 
   if (specifiedVersion) {
     releaseTag = specifiedVersion.startsWith('v') ? specifiedVersion : `v${specifiedVersion}`;
-    xdbUrl = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v4.xdb`;
+    v4Url = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v4.xdb`;
+    v6Url = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v6.xdb`;
     console.log(`指定版本: ${releaseTag}`);
   } else {
     console.log('检查 ip2region 最新版本...');
     const release = await getLatestRelease();
     releaseTag = release.tag;
 
-    const asset = findXdbAsset(release.assets);
-    if (asset) {
-      xdbUrl = asset.browser_download_url;
-    } else {
-      xdbUrl = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v4.xdb`;
-    }
+    // v4 xdb
+    const v4Asset = findXdbAsset(release.assets, [/ip2region\.xdb/, /ip2region_v4\.xdb/, /ipv4.*\.xdb/]);
+    v4Url = v4Asset
+      ? v4Asset.browser_download_url
+      : `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v4.xdb`;
+
+    // v6 xdb
+    const v6Asset = findXdbAsset(release.assets, [/ip2region_v6\.xdb/, /ipv6.*\.xdb/]);
+    v6Url = v6Asset
+      ? v6Asset.browser_download_url
+      : `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/raw/${releaseTag}/data/ip2region_v6.xdb`;
+
     console.log(`最新版本: ${releaseTag}`);
   }
 
@@ -294,22 +345,40 @@ async function main() {
   }
   console.log(`KV 当前版本: ${currentVersion || '无'}，需要更新到 ${releaseTag}`);
 
-  // 5. 下载 xdb
-  const xdbBuffer = await downloadXdb(xdbUrl);
-
-  // 6. 上传到 KV
-  console.log('上传 xdb 到 KV...');
-  await putKvValue(namespaceId, XDB_KEY, new Uint8Array(xdbBuffer), {
+  // 5. 下载并上传 v4 xdb
+  console.log('\n── IPv4 xdb ──');
+  const v4Buffer = await downloadXdb(v4Url, 'v4');
+  console.log('上传 v4 xdb 到 KV...');
+  await putKvValue(namespaceId, V4_KEY, new Uint8Array(v4Buffer), {
     version: releaseTag,
     updated_at: new Date().toISOString(),
   });
+
+  // 6. 下载并分片上传 v6 xdb
+  if (skipV6) {
+    console.log('\n── IPv6 xdb: 跳过（SKIP_V6=1）──');
+  } else {
+    console.log('\n── IPv6 xdb ──');
+    try {
+      const v6Buffer = await downloadXdb(v6Url, 'v6');
+      console.log('分片上传 v6 xdb 到 KV...');
+      await putShardedXdb(namespaceId, V6_KEYS, v6Buffer);
+    } catch (e) {
+      // v6 下载失败不应阻塞 v4 部署
+      console.warn(`v6 xdb 处理失败（不影响 v4）: ${e.message}`);
+    }
+  }
 
   // 7. 写入版本号
   await putKvValue(namespaceId, VERSION_KEY, releaseTag, {
     updated_at: new Date().toISOString(),
   });
 
-  console.log(`更新完成: ${currentVersion || '(无)'} → ${releaseTag}`);
+  console.log(`\n更新完成: ${currentVersion || '(无)'} → ${releaseTag}`);
+  console.log(`  v4: KV key "${V4_KEY}"`);
+  if (!skipV6) {
+    console.log(`  v6: KV keys ${V6_KEYS.map((k, i) => `${k}`).join(', ')}`);
+  }
 }
 
 main().catch(err => {
