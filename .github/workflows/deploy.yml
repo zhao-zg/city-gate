@@ -1,0 +1,53 @@
+name: 部署 Workers
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      worker:
+        description: '指定部署的 Worker（留空则部署全部）'
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 wrangler
+        run: npm install -g wrangler
+
+      - name: 确定要部署的 Workers
+        id: workers
+        run: |
+          if [ -n "${{ github.event.inputs.worker }}" ]; then
+            WORKERS="${{ github.event.inputs.worker }}"
+          else
+            # 自动发现 workers/ 下所有包含 wrangler.toml 的目录
+            WORKERS=$(find workers -name "wrangler.toml" -exec dirname {} \; | sed 's|workers/||' | sort | tr '\n' ' ')
+          fi
+          echo "list=$WORKERS" >> "$GITHUB_OUTPUT"
+          echo "📦 将部署: $WORKERS"
+
+      - name: 部署 Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for worker in ${{ steps.workers.outputs.list }}; do
+            echo "🚀 部署 $worker ..."
+            if wrangler deploy "workers/$worker" --config "workers/$worker/wrangler.toml"; then
+              echo "✓ $worker 部署成功"
+            else
+              echo "✗ $worker 部署失败"
+              exit 1
+            fi
+          done

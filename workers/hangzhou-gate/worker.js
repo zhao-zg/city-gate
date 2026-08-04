@@ -1,0 +1,143 @@
+/**
+ * Cloudflare Worker — 城市IP访问限制网关
+ *
+ * 部署在自定义域名上，仅允许指定城市的 IP 访问。
+ * 非允许城市的请求返回 403，允许城市的请求反向代理到源站。
+ *
+ * 环境变量（在 Cloudflare Dashboard 或 wrangler.toml 中设置）:
+ *   ALLOWED_CITIES  — 允许的城市列表，逗号分隔（默认 "Hangzhou"）
+ *   PAGES_ORIGIN    — 源站地址（默认 "https://sg.pages.dev"）
+ */
+
+// ── 配置 ──────────────────────────────────────────────
+
+// 域名 → 源站映射（优先使用环境变量 PAGES_ORIGIN，此处作兜底）
+const DOMAIN_MAP = {
+  'sg.1189.dpdns.org':    'https://sg.pages.dev',
+  'sg.07170501.xyz':      'https://sg.pages.dev',
+  'sg.bxg.dpdns.org':     'https://sg.pages.dev',
+};
+
+// 默认允许的城市（Cloudflare request.cf.city 的值）
+const DEFAULT_ALLOWED_CITIES = ['Hangzhou'];
+
+// ── Worker 入口 ───────────────────────────────────────
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const hostname = url.hostname;
+
+    // 1. 查找源站
+    const origin = env.PAGES_ORIGIN || DOMAIN_MAP[hostname] || 'https://sg.pages.dev';
+
+    // 2. IP 地理判断
+    const cf = request.cf || {};
+    const city = cf.city || '';
+    const region = cf.region || '';
+    const country = cf.country || '';
+
+    const allowedCities = (env.ALLOWED_CITIES || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const cityList = allowedCities.length > 0 ? allowedCities : DEFAULT_ALLOWED_CITIES;
+
+    const isAllowed = cityList.some(c => city.toLowerCase() === c.toLowerCase());
+
+    // 3. 非允许城市返回 403
+    if (!isAllowed) {
+      return new Response(denyPage(city, region, country, cityList.join(', ')), {
+        status: 403,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // 4. 允许城市：反向代理到源站
+    return proxyRequest(request, url, origin);
+  },
+};
+
+// ── 反向代理 ──────────────────────────────────────────
+
+async function proxyRequest(request, url, origin) {
+  const targetUrl = origin + url.pathname + url.search;
+
+  const headers = new Headers(request.headers);
+  headers.set('Host', new URL(origin).host);
+  headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
+  headers.delete('CF-Connecting-IP');
+  headers.delete('CF-IPCountry');
+  headers.delete('CF-Ray');
+  headers.delete('CF-Visitor');
+
+  const response = await fetch(targetUrl, {
+    method: request.method,
+    headers,
+    body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+    redirect: 'manual',
+  });
+
+  const respHeaders = new Headers(response.headers);
+  respHeaders.delete('x-robots-tag');
+  respHeaders.set('Access-Control-Allow-Origin', '*');
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: respHeaders,
+  });
+}
+
+// ── 403 页面 ─────────────────────────────────────────
+
+function denyPage(city, region, country, allowedCities) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>访问受限</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff;
+    }
+    .card {
+      background: rgba(255,255,255,0.12);
+      backdrop-filter: blur(20px);
+      border-radius: 20px;
+      padding: 48px 40px;
+      max-width: 420px;
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+    .icon { font-size: 64px; margin-bottom: 24px; }
+    h1 { font-size: 24px; margin-bottom: 12px; }
+    p { font-size: 14px; line-height: 1.8; opacity: 0.9; }
+    .info {
+      margin-top: 20px;
+      padding: 12px 20px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#128274;</div>
+    <h1>访问受限</h1>
+    <p>本站点仅限 ${allowedCities} 地区访问</p>
+    <div class="info">
+      您的 IP 归属地：${city || '未知'}${region ? '，' + region : ''}${country ? '，' + country : ''}
+    </div>
+  </div>
+</body>
+</html>`;
+}
