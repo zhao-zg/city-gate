@@ -40,13 +40,6 @@ jobs:
           KV_NAMESPACE_ID: ${{ secrets.KV_IP2REGION_NAMESPACE_ID }}
         run: node scripts/update-ip2region.js
 
-      - name: 从 wrangler.toml 读取 KV namespace id
-        id: kv-id
-        run: |
-          KV_ID=$(grep -A1 'binding = "IP2REGION"' workers/city-gate/wrangler.toml | grep 'id =' | sed 's/.*id = "\(.*\)".*/\1/')
-          echo "id=$KV_ID" >> "$GITHUB_OUTPUT"
-          echo "KV namespace id: $KV_ID"
-
   # ── Job 2：部署 Workers（仅 push 和手动触发时执行）────
   deploy:
     runs-on: ubuntu-latest
@@ -70,18 +63,33 @@ jobs:
         run: npm install -g wrangler
 
       - name: 注入 KV namespace ID
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # 优先使用 update-xdb job 通过 API 自动获取/创建的 KV namespace id
-          KV_ID="${{ needs.update-xdb.outputs.kv_namespace_id }}"
+          # 优先从 secret 获取
+          KV_ID="${{ secrets.KV_IP2REGION_NAMESPACE_ID }}"
+
+          # secret 未配置时，通过 Cloudflare API 查找已创建的 KV namespace
+          if [ -z "$KV_ID" ]; then
+            echo "通过 API 查找 KV namespace city-gate-IP2REGION..."
+            RESPONSE=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces")
+            KV_ID=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for ns in data.get('result', []):
+              if ns.get('title') == 'city-gate-IP2REGION':
+                  print(ns['id'])
+                  break
+          " 2>/dev/null || true)
+          fi
+
           if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
             sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" workers/city-gate/wrangler.toml
-            echo "已注入脚本自动获取的 KV namespace id: $KV_ID"
-          elif [ -n "${{ secrets.KV_IP2REGION_NAMESPACE_ID }}" ]; then
-            sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/${{ secrets.KV_IP2REGION_NAMESPACE_ID }}/g" \
-              workers/city-gate/wrangler.toml
-            echo "已从 secret 注入 KV namespace ID"
+            echo "已注入 KV namespace id: $KV_ID"
           else
-            echo "警告: 未配置 KV namespace id，Worker 可能无法正常工作"
+            echo "警告: 未找到 KV namespace id，Worker 可能无法正常工作"
           fi
 
       - name: 确定要部署的 Workers
