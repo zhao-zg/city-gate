@@ -6,9 +6,10 @@
  * @param {string} reason — 拒绝原因
  * @param {string} source — 数据来源：ip2region / cf
  * @param {string} isp — 运营商
+ * @param {string} debugInfo — 调试信息（IP、ip2region/CF对比）
  * @returns {string} HTML
  */
-export function denyPage(city, province, country, reason = '', source = '', isp = '') {
+export function denyPage(city, province, country, reason = '', source = '', isp = '', debugInfo = '') {
   const locationParts = [city || '未知城市', province, country].filter(Boolean);
   const locationText = locationParts.join('，');
 
@@ -22,6 +23,10 @@ export function denyPage(city, province, country, reason = '', source = '', isp 
 
   const reasonLine = reason
     ? `<div class="reason">${reason}</div>`
+    : '';
+
+  const debugLine = debugInfo
+    ? `<div class="debug">${debugInfo}</div>`
     : '';
 
   return `<!DOCTYPE html>
@@ -69,6 +74,13 @@ export function denyPage(city, province, country, reason = '', source = '', isp 
       color: #ffd6a0;
       font-size: 13px;
     }
+    .debug {
+      margin-top: 6px;
+      color: rgba(255,255,255,0.5);
+      font-size: 11px;
+      word-break: break-all;
+      font-family: monospace;
+    }
   </style>
 </head>
 <body>
@@ -81,6 +93,7 @@ export function denyPage(city, province, country, reason = '', source = '', isp 
       ${ispLine}
       ${sourceLine}
       ${reasonLine}
+      ${debugLine}
     </div>
   </div>
 </body>

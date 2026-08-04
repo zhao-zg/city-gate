@@ -121,7 +121,9 @@ export default {
     // 6. 非允许地区返回 403
     if (!isAllowed) {
       const reason = `城市 ${city || '未知'}（${province || '未知省份'}）不在允许列表 [${allowedCities.join(', ')}]`;
-      return new Response(denyPage(city, province, loc.country, reason, loc.source, loc.isp), {
+      // 调试信息：同时显示 ip2region 和 CF 的判断结果
+      const debugInfo = `IP: ${clientIP} | ip2region: ${city}/${province} | CF: ${cf.city || '?'}/${cf.region || '?'}`;
+      return new Response(denyPage(city, province, loc.country, reason, loc.source, loc.isp, debugInfo), {
         status: 403,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
