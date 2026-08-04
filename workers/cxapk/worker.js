@@ -1,26 +1,26 @@
 /**
  * Cloudflare Worker — CX APK 下载代理（带地理检查）
  *
- * 根据 URL 路径段动态替换源站前缀，逐个尝试获取 version.json 并代理 APK 文件。
- * 地理匹配策略（IPv4/IPv6 均支持）：
- * - ip2region 可用时：城市级精确匹配
- * - ip2region 不可用时：降级到 CF 省级代码匹配
+ * 根据 URL 路径段动态替换源站前缀，获取 version.json 并代理 APK 文件。
+ * 走域名源站，通过 X-Original-IP + X-Gate-Key 传递客户端真实 IP，
+ * 让 city-gate Worker 正确做地理判断，避免 Worker 自抓被 403。
  *
  * 环境变量:
- *   ALLOWED_CITIES — 允许的城市，逗号分隔（如 "杭州,Hangzhou"）
- *   ALLOWED_PROVINCES — 允许的省份，逗号分隔（如 "浙江,Zhejiang"）
+ *   GATE_KEY         — 与 city-gate 共享的密钥，防止 X-Original-IP 伪造
+ *   ALLOWED_CITIES   — 允许的城市，逗号分隔（如 "杭州,Hangzhou"）
+ *   ALLOWED_PROVINCES— 允许的省份，逗号分隔（如 "浙江,Zhejiang"）
  */
 
 import { denyPage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
-// 源站列表（直连 Pages 源站，绕过 city-gate 地理限制，避免 Worker 自抓被 403）
-// key: 路径段前缀, value: Pages 源站 URL
-const PAGES_ORIGINS = {
-  sg:   'https://sg-7gj.pages.dev/',
-  cx:   'https://cx-1wd.pages.dev/',
-  bible: 'https://bible-2o8.pages.dev/',
-  books: 'https://books-89r.pages.dev/',
+// 域名源站列表（走域名，由 city-gate 做地理限制）
+// key: 路径段前缀, value: 域名源站 URL
+const DOMAIN_ORIGINS = {
+  sg:    'https://sg.zhaozg.dpdns.org/',
+  cx:    'https://cx.zhaozg.dpdns.org/',
+  bible: 'https://bible.zhaozg.dpdns.org/',
+  books: 'https://books.zhaozg.dpdns.org/',
 };
 
 export default {
@@ -74,17 +74,24 @@ export default {
     // ── APK 代理逻辑 ──
     const url = new URL(request.url);
     const seg = url.pathname.split('/').filter(Boolean)[0] || '';
-    const origin = PAGES_ORIGINS[seg] || PAGES_ORIGINS['cx'];
-    const basePath = url.pathname.replace(/^\/[^/]+/, '') || '/';
+    const origin = DOMAIN_ORIGINS[seg] || DOMAIN_ORIGINS['cx'];
 
-    // version.json 在源站根目录
-    const baseUrl = seg ? origin : PAGES_ORIGINS['cx'];
+    // 构建转发头：传递客户端真实 IP + 密钥，让 city-gate 用客户端 IP 做地理判断
+    const clientIP = request.headers.get('CF-Connecting-IP') || '';
+    const gateKey = env.GATE_KEY || '';
+    const fwdHeaders = { 'X-Original-IP': clientIP };
+    if (gateKey) fwdHeaders['X-Gate-Key'] = gateKey;
+
     try {
-      const res = await fetch(baseUrl + 'version.json', { cf: { cacheEverything: false } });
+      const res = await fetch(origin + 'version.json', {
+        headers: fwdHeaders,
+        cf: { cacheEverything: false },
+      });
       if (!res.ok) return new Response('APK 暂时无法获取，请稍后重试', { status: 502 });
       const { apk_file } = await res.json();
       if (!apk_file) return new Response('APK 信息缺失', { status: 502 });
-      const apkRes = await fetch(baseUrl + apk_file);
+
+      const apkRes = await fetch(origin + apk_file, { headers: fwdHeaders });
       if (!apkRes.ok) return new Response('APK 下载失败', { status: 502 });
       return new Response(apkRes.body, {
         status: 200,

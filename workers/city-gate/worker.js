@@ -113,8 +113,17 @@ export default {
     }
 
     // 5. IP 地理判断
+    // 优先使用可信 Worker 传递的原始客户端 IP（X-Original-IP + X-Gate-Key 校验）
     const cf = request.cf || {};
-    const clientIP = request.headers.get('CF-Connecting-IP') || '';
+    const gateKey = request.headers.get('X-Gate-Key') || '';
+    const originalIP = request.headers.get('X-Original-IP') || '';
+    const trustedKey = env.GATE_KEY || '';
+
+    // 只有密钥匹配时才信任 X-Original-IP（防伪造）
+    const clientIP = (gateKey && trustedKey && gateKey === trustedKey && originalIP)
+      ? originalIP
+      : (request.headers.get('CF-Connecting-IP') || '');
+
     const loc = lookupIP(clientIP, cf);
 
     let isAllowed = false;
