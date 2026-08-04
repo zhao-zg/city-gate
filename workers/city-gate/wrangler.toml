@@ -29,7 +29,7 @@ zone_name = "07170501.xyz"
 
 [[routes]]
 pattern = "books.1189.dpdns.org/*"
-zone_name = "zhaozg.1189.dpdns.org"
+zone_name = "1189.dpdns.org"
 
 [[routes]]
 pattern = "books.zhaozg.dpdns.org/*"
