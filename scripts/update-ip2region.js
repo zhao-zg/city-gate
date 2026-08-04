@@ -199,6 +199,18 @@ async function getKvValue(namespaceId, key) {
   return res.text();
 }
 
+/**
+ * 检查 KV key 是否存在（不读取完整内容，对大文件友好）
+ */
+async function kvKeyExists(namespaceId, key) {
+  const res = await cfApi(`/storage/kv/namespaces/${namespaceId}/values/${key}`, {
+    method: 'HEAD',
+  });
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`KV HEAD 失败: HTTP ${res.status} key=${key}`);
+  return true;
+}
+
 async function putKvValue(namespaceId, key, value, metadata = {}) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const token = process.env.CLOUDFLARE_API_TOKEN;
@@ -337,27 +349,45 @@ async function main() {
     console.log(`最新版本: ${releaseTag}`);
   }
 
-  // 4. 检查 KV 中是否已是最新版本
+  // 4. 检查 KV 中各 xdb 是否已上传（版本号一致不代表分片存在，需分别检查）
   const currentVersion = await getKvValue(namespaceId, VERSION_KEY);
-  if (currentVersion === releaseTag) {
-    console.log(`KV 中已是最新版本 ${releaseTag}，跳过更新`);
+  const needV4 = !(await kvKeyExists(namespaceId, V4_KEY));
+  let needV6 = false;
+  if (!skipV6) {
+    // 任一 v6 分片缺失就需要重新上传
+    for (const key of V6_KEYS) {
+      if (!(await kvKeyExists(namespaceId, key))) {
+        needV6 = true;
+        break;
+      }
+    }
+  }
+
+  if (!needV4 && !needV6 && currentVersion === releaseTag) {
+    console.log(`KV 中已是最新版本 ${releaseTag}，v4/v6 均已存在，跳过更新`);
     return;
   }
-  console.log(`KV 当前版本: ${currentVersion || '无'}，需要更新到 ${releaseTag}`);
+  console.log(`KV 当前版本: ${currentVersion || '无'}，目标: ${releaseTag}`);
+  console.log(`  v4: ${needV4 ? '需要上传' : '已存在（跳过）'}`);
+  console.log(`  v6: ${skipV6 ? '跳过（SKIP_V6=1）' : needV6 ? '需要上传' : '已存在（跳过）'}`);
 
   // 5. 下载并上传 v4 xdb
-  console.log('\n── IPv4 xdb ──');
-  const v4Buffer = await downloadXdb(v4Url, 'v4');
-  console.log('上传 v4 xdb 到 KV...');
-  await putKvValue(namespaceId, V4_KEY, new Uint8Array(v4Buffer), {
-    version: releaseTag,
-    updated_at: new Date().toISOString(),
-  });
+  if (needV4) {
+    console.log('\n── IPv4 xdb ──');
+    const v4Buffer = await downloadXdb(v4Url, 'v4');
+    console.log('上传 v4 xdb 到 KV...');
+    await putKvValue(namespaceId, V4_KEY, new Uint8Array(v4Buffer), {
+      version: releaseTag,
+      updated_at: new Date().toISOString(),
+    });
+  } else {
+    console.log('\n── IPv4 xdb: 已存在，跳过 ──');
+  }
 
   // 6. 下载并分片上传 v6 xdb
   if (skipV6) {
     console.log('\n── IPv6 xdb: 跳过（SKIP_V6=1）──');
-  } else {
+  } else if (needV6) {
     console.log('\n── IPv6 xdb ──');
     try {
       const v6Buffer = await downloadXdb(v6Url, 'v6');
@@ -367,17 +397,19 @@ async function main() {
       // v6 下载失败不应阻塞 v4 部署
       console.warn(`v6 xdb 处理失败（不影响 v4）: ${e.message}`);
     }
+  } else {
+    console.log('\n── IPv6 xdb: 已存在，跳过 ──');
   }
 
-  // 7. 写入版本号
+  // 7. 更新版本号
   await putKvValue(namespaceId, VERSION_KEY, releaseTag, {
     updated_at: new Date().toISOString(),
   });
 
   console.log(`\n更新完成: ${currentVersion || '(无)'} → ${releaseTag}`);
-  console.log(`  v4: KV key "${V4_KEY}"`);
+  console.log(`  v4: KV key "${V4_KEY}" — ${needV4 ? '已上传' : '已存在'}`);
   if (!skipV6) {
-    console.log(`  v6: KV keys ${V6_KEYS.map((k, i) => `${k}`).join(', ')}`);
+    console.log(`  v6: KV keys ${V6_KEYS.join(', ')} — ${needV6 ? '已上传' : '已存在'}`);
   }
 }
 
