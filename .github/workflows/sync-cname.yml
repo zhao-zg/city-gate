@@ -8,7 +8,7 @@ on:
         description: '预览模式（1=仅预览不执行）'
         required: false
         type: string
-        default: '1'
+        default: '0'
   # 推送 master 时自动同步（可按需关闭）
   push:
     branches: [master]
