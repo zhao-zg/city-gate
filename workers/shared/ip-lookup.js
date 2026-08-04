@@ -1,7 +1,8 @@
 /**
  * IP 归属地查询 — 统一封装层
  *
- * 优先级：ip2region(KV+内存) > Cloudflare request.cf
+ * 使用 ip2region（KV+内存缓存）查询 IP 省份信息。
+ * 如果 ip2region 不可用（xdb 未加载），降级使用 Cloudflare request.cf 的省级代码。
  *
  * 使用方式：
  *   1. 请求入口调用 initIpLookup(kv) 初始化（冷启动从 KV 加载 xdb）
@@ -26,9 +27,39 @@ export async function initIpLookup(kv, key = 'ip2region_v4.xdb') {
     await initIp2Region(kv, key);
     _initialized = true;
   } catch (e) {
-    // xdb 加载失败不影响服务，降级到 cf 自带数据
     console.error(`ip2region init failed: ${e.message}`);
   }
+}
+
+// ── 省份/城市名规范化 ──────────────────────────────────
+
+// ip2region 返回 "浙江省"、"上海市"、"内蒙古自治区"、"香港特别行政区"
+// 配置中写的是 "浙江"、"上海"、"内蒙古"、"香港"
+// 统一剥离后缀，让匹配更宽松
+
+const PROVINCE_SUFFIXES = ['特别行政区', '自治区', '省', '市'];
+const CITY_SUFFIXES = ['特别行政区', '自治州', '地区', '盟', '市'];
+
+/**
+ * 剥离省份后缀：浙江省 → 浙江，上海市 → 上海，内蒙古自治区 → 内蒙古
+ */
+function normalizeProvince(name) {
+  if (!name) return '';
+  for (const s of PROVINCE_SUFFIXES) {
+    if (name.endsWith(s)) return name.slice(0, -s.length);
+  }
+  return name;
+}
+
+/**
+ * 剥离城市后缀：杭州市 → 杭州，上海市 → 上海
+ */
+function normalizeCity(name) {
+  if (!name) return '';
+  for (const s of CITY_SUFFIXES) {
+    if (name.endsWith(s)) return name.slice(0, -s.length);
+  }
+  return name;
 }
 
 // ── 归属地结果 ──────────────────────────────────────
@@ -36,52 +67,39 @@ export async function initIpLookup(kv, key = 'ip2region_v4.xdb') {
 /**
  * @typedef {Object} IPLookupResult
  * @property {string} country   - 国家
- * @property {string} province  - 省份（ip2region 更准）
- * @property {string} city     - 城市（ip2region 更准）
- * @property {string} region   - Cloudflare 省级代码
+ * @property {string} province  - 省份（已去后缀：浙江 / CF 英文省级代码）
+ * @property {string} city     - 城市（已去后缀：杭州）
  * @property {string} isp      - 运营商
  * @property {string} source    - 数据来源：'ip2region' | 'cf'
- * @property {string} [lat]    - Cloudflare 经度
- * @property {string} [lon]    - Cloudflare 纬度
  */
 
 /**
  * 查询 IP 归属地
  *
  * @param {string} ip - 客户端 IP
- * @param {Object} cf - request.cf 对象
+ * @param {Object} cf - request.cf 对象（降级时使用）
  * @returns {IPLookupResult}
  */
 export function lookupIP(ip, cf = {}) {
-  const cfCity = cf.city || '';
-  const cfRegion = cf.region || '';
-  const cfCountry = cf.country || '';
-
   // 尝试 ip2region
   const region = searchIp2Region(ip);
   if (region) {
     const p = parseRegionString(region);
     return {
-      country: p.country || cfCountry,
-      province: p.province || cfRegion,
-      city: p.city || cfCity,
-      region: cfRegion,
-      isp: p.isp,
+      country: p.country || cf.country || '',
+      province: normalizeProvince(p.province) || cf.region || '',
+      city: normalizeCity(p.city) || cf.city || '',
+      isp: p.isp || '',
       source: 'ip2region',
-      lat: cf.latitude || '',
-      lon: cf.longitude || '',
     };
   }
 
-  // 降级到 Cloudflare
+  // 降级到 Cloudflare（省级代码 region 精度可靠）
   return {
-    country: cfCountry,
-    province: cfRegion,
-    city: cfCity,
-    region: cfRegion,
+    country: cf.country || '',
+    province: cf.region || '',
+    city: cf.city || '',
     isp: '',
     source: 'cf',
-    lat: cf.latitude || '',
-    lon: cf.longitude || '',
   };
 }

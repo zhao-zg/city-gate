@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '219df9b5-ff77-4afe-971f-d83bf82a35a3'
-  PropagateID: '219df9b5-ff77-4afe-971f-d83bf82a35a3'
-  ReservedCode1: '3464ffa0-9582-448a-a251-2e53c5eaef99'
-  ReservedCode2: '3464ffa0-9582-448a-a251-2e53c5eaef99'
+  ProduceID: '7aea08d1-0a45-40c8-9df7-24ba94057293'
+  PropagateID: '7aea08d1-0a45-40c8-9df7-24ba94057293'
+  ReservedCode1: '5b7a5ad7-c4bb-4aa8-8ea1-885f950d35f8'
+  ReservedCode2: '5b7a5ad7-c4bb-4aa8-8ea1-885f950d35f8'
 ---
 
 # city-gate
@@ -34,15 +34,14 @@ scripts/
 
 ## 地理匹配策略
 
-三级匹配，满足任一即放行，精度递减：
+城市级匹配：ip2region 离线IP库精确到城市，由运营商IP段决定，精度远高于 Cloudflare GeoIP。
 
-| 优先级 | 策略 | 数据源 | 精度 |
-|--------|------|--------|------|
-| 1 | 省级匹配 | ip2region（KV+内存缓存） | 最高 |
-| 2 | 经纬度距离 | Cloudflare `request.cf` | 中等 |
-| 3 | 城市名匹配 | Cloudflare `request.cf` | 最低 |
+| 策略 | 数据源 | 精度 |
+|------|--------|------|
+| 城市级匹配 | ip2region（KV+内存缓存） | 精确到城市 |
 
 ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载到内存，后续查询纯内存操作（~0.01ms）。
+如果 ip2region 不可用（xdb 未加载），降级使用 Cloudflare `request.cf` 的城市名。
 
 ## 域名组配置
 
@@ -50,8 +49,7 @@ ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载�
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
-    regions: ['浙江', '上海', 'Zhejiang', 'Shanghai'],  // 省级匹配（中英文兼容）
-    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 150 }, // 经纬度兜底
+    cities: ['杭州', 'Hangzhou'],  // 城市级匹配（中英文兼容）
     domains: ['sg.1189.dpdns.org', ...],
   },
   {
@@ -144,7 +142,4 @@ CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
 |------|--------|------|
 | `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串，覆盖代码内配置 |
 | `PAGES_ORIGIN` | city-gate | 兜底源站地址 |
-| `ALLOWED_REGIONS` | cxapk | 允许的省份，逗号分隔 |
-| `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（向下兼容） |
-| `GEO_CENTER` | cxapk | 经纬度中心，格式 `lat,lon` |
-| `GEO_RADIUS_KM` | cxapk | 允许半径(km)，默认 150 |
+| `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（如 `杭州,Hangzhou`） |

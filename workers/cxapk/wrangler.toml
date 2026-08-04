@@ -9,4 +9,4 @@ zone_name = "07170501.xyz"
 
 # 城市限制（不配置则全部允许）
 #[vars]
-#ALLOWED_CITIES = "Hangzhou"
+#ALLOWED_CITIES = "杭州,Hangzhou"

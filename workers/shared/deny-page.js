@@ -4,19 +4,13 @@
  * @param {string} province
  * @param {string} country
  * @param {string} reason — 拒绝原因
- * @param {string} lat — 纬度
- * @param {string} lon — 经度
  * @param {string} source — 数据来源：ip2region / cf
  * @param {string} isp — 运营商
  * @returns {string} HTML
  */
-export function denyPage(city, province, country, reason = '', lat = '', lon = '', source = '', isp = '') {
+export function denyPage(city, province, country, reason = '', source = '', isp = '') {
   const locationParts = [city || '未知城市', province, country].filter(Boolean);
   const locationText = locationParts.join('，');
-
-  const coordLine = (lat && lon)
-    ? `<div class="detail">经纬度：${lat}, ${lon}</div>`
-    : '';
 
   const sourceLine = source
     ? `<div class="detail">数据来源：${source === 'ip2region' ? 'ip2region（高精度）' : 'Cloudflare GeoIP'}</div>`
@@ -85,7 +79,6 @@ export function denyPage(city, province, country, reason = '', lat = '', lon = '
     <div class="info">
       IP 归属地：${locationText}
       ${ispLine}
-      ${coordLine}
       ${sourceLine}
       ${reasonLine}
     </div>
