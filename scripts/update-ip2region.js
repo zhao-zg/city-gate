@@ -193,13 +193,35 @@ async function getKvValue(namespaceId, key) {
 async function putKvValue(namespaceId, key, value, metadata = {}) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const token = process.env.CLOUDFLARE_API_TOKEN;
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
+  const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
 
+  // 对于二进制大文件（如 xdb），直接用 PUT body 传输，避免 FormData base64 膨胀
+  // metadata 通过 URL 参数传递
+  if (value instanceof Uint8Array) {
+    const metaParam = Object.keys(metadata).length > 0
+      ? `&metadata=${encodeURIComponent(JSON.stringify(metadata))}`
+      : '';
+    const res = await fetch(`${baseUrl}?${metaParam}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: value,
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`KV 写入失败: HTTP ${res.status} ${err}`);
+    }
+    return;
+  }
+
+  // 小文本值用 FormData
   const formData = new FormData();
   formData.append('value', value);
   formData.append('metadata', JSON.stringify(metadata));
 
-  const res = await fetch(url, {
+  const res = await fetch(baseUrl, {
     method: 'PUT',
     headers: { 'Authorization': `Bearer ${token}` },
     body: formData,
