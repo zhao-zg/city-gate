@@ -3,9 +3,26 @@
  * @param {string} city
  * @param {string} region
  * @param {string} country
+ * @param {string} reason — 拒绝原因（可选）
+ * @param {string} lat — Cloudflare 返回的纬度（可选）
+ * @param {string} lon — Cloudflare 返回的经度（可选）
  * @returns {string} HTML
  */
-export function denyPage(city, region, country) {
+export function denyPage(city, region, country, reason = '', lat = '', lon = '') {
+  const locationText = [
+    city || '未知',
+    region,
+    country
+  ].filter(Boolean).join('，');
+
+  const coordLine = (lat && lon)
+    ? `<div class="coord">经纬度：${lat}, ${lon}</div>`
+    : '';
+
+  const reasonLine = reason
+    ? `<div class="reason">${reason}</div>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -41,6 +58,12 @@ export function denyPage(city, region, country) {
       font-size: 13px;
       line-height: 1.6;
     }
+    .coord, .reason {
+      margin-top: 6px;
+      opacity: 0.7;
+      font-size: 12px;
+    }
+    .reason { color: #ffd6a0; }
   </style>
 </head>
 <body>
@@ -49,7 +72,9 @@ export function denyPage(city, region, country) {
     <h1>访问受限</h1>
     <p>您所在的地区暂不支持访问<br>如有需要请联系管理员</p>
     <div class="info">
-      您的 IP 归属地：${city || '未知'}${region ? '，' + region : ''}${country ? '，' + country : ''}
+      您的 IP 归属地：${locationText}
+      ${coordLine}
+      ${reasonLine}
     </div>
   </div>
 </body>

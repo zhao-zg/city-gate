@@ -5,8 +5,13 @@
  * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
  *
  * 配置方式 — 域名组：
- *   按源站分组，同组的域名共享 cities 和 origin，不用重复写。
+ *   按源站分组，同组的域名共享 geo / origin，不用重复写。
  *   个别域名有差异时，在 overrides 中覆盖。
+ *
+ * 地理匹配策略：
+ *   geo: { lat, lon, radiusKm } — 经纬度 + 半径(km)，精度远高于城市名匹配
+ *   cities: ['Hangzhou']      — 旧方式，城市名精确匹配（向下兼容）
+ *   两者同时配置时 geo 优先
  */
 
 import { denyPage } from '../shared/deny-page.js';
@@ -15,12 +20,12 @@ import { denyPage } from '../shared/deny-page.js';
 const DEFAULT_CITIES = ['ALL'];
 
 // ── 域名组配置 ────────────────────────────────────────
-// 按源站分组，同组域名共享 cities / origin
+// 按源站分组，同组域名共享 geo / cities / origin
 // 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
 const DOMAIN_GROUPS = [
   {
     origin: 'https://sg-7gj.pages.dev',
-    cities: ['Hangzhou'],
+    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 70 }, // 杭州 70km
     domains: [
       'sg.1189.dpdns.org',
       'sg.07170501.xyz',
@@ -31,7 +36,7 @@ const DOMAIN_GROUPS = [
   },
   {
     origin: 'https://books-89r.pages.dev',
-    cities: ['Hangzhou'],
+    geo: { lat: 30.2741, lon: 120.1551, radiusKm: 70 }, // 杭州 70km
     domains: [
       'books.07170501.xyz',
       'books.1189.dpdns.org',
@@ -63,13 +68,25 @@ const DOMAIN_GROUPS = [
   }
 ];
 
+// ── Haversine 距离计算（km）──────────────────────────
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 // ── 构建域名查找表 ────────────────────────────────────
-// 将分组配置展开为 { hostname → { cities, origin } } 的扁平字典
+// 将分组配置展开为 { hostname → { geo, cities, origin } } 的扁平字典
 const DOMAIN_CONFIG = {};
 for (const group of DOMAIN_GROUPS) {
+  const geo = group.geo || null;
   const cities = group.cities || DEFAULT_CITIES;
   for (const domain of group.domains) {
-    DOMAIN_CONFIG[domain] = { cities, origin: group.origin };
+    DOMAIN_CONFIG[domain] = { geo, cities, origin: group.origin };
   }
 }
 
@@ -90,13 +107,14 @@ export default {
       config = DOMAIN_CONFIG;
     }
 
-    // 2. 查找当前域名的城市列表和源站
+    // 2. 查找当前域名的地理配置和源站
     const domainCfg = config[hostname] || {};
+    const geo = domainCfg.geo || null;
     const allowedCities = domainCfg.cities || DEFAULT_CITIES;
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
 
     // 3. 城市为 ALL 时全部放行
-    if (allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL') {
+    if (allowedCities.length === 1 && allowedCities[0].toUpperCase() === 'ALL' && !geo) {
       return proxyRequest(request, url, origin);
     }
 
@@ -106,13 +124,37 @@ export default {
     const region = cf.region || '';
     const country = cf.country || '';
 
-    const isAllowed = allowedCities.some(
-      c => city.toLowerCase() === c.toLowerCase()
-    );
+    let isAllowed = false;
+    let denyReason = '';
 
-    // 5. 非允许城市返回 403
+    // 优先：经纬度距离匹配
+    if (geo) {
+      const reqLat = parseFloat(cf.latitude);
+      const reqLon = parseFloat(cf.longitude);
+      if (!isNaN(reqLat) && !isNaN(reqLon)) {
+        const dist = haversineKm(geo.lat, geo.lon, reqLat, reqLon);
+        isAllowed = dist <= geo.radiusKm;
+        if (!isAllowed) {
+          denyReason = `距允许区域中心 ${dist.toFixed(0)}km，超出 ${geo.radiusKm}km 限制`;
+        }
+      } else {
+        // 经纬度缺失时回退到城市名匹配
+        isAllowed = allowedCities.some(c => city.toLowerCase() === c.toLowerCase());
+        if (!isAllowed) denyReason = '经纬度缺失且城市名不匹配';
+      }
+    } else {
+      // 旧方式：城市名精确匹配
+      isAllowed = allowedCities.some(
+        c => city.toLowerCase() === c.toLowerCase()
+      );
+      if (!isAllowed) denyReason = '城市不在允许列表中';
+    }
+
+    // 5. 非允许地区返回 403
     if (!isAllowed) {
-      return new Response(denyPage(city, region, country), {
+      const cfLat = cf.latitude || '';
+      const cfLon = cf.longitude || '';
+      return new Response(denyPage(city, region, country, denyReason, cfLat, cfLon), {
         status: 403,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
