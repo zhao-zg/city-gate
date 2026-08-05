@@ -41,7 +41,8 @@ const DOMAIN_GROUPS = [
   },
   {
     origin: 'https://bible-2o8.pages.dev',
-    cities: ['ALL'],
+    cities: ['杭州', 'Hangzhou'],
+    provinces: ['浙江', 'Zhejiang'],
     domains: [
       'bible.zhaozg.dpdns.org',
       'bible.07170501.xyz',
