@@ -102,7 +102,7 @@ DOMAIN_CONFIG_JSON = """
     ]
   },
   {
-    "origin": "https://cx-7ai.pages.dev,
+    "origin": "https://cx-7ai.pages.dev",
     "cities": ["ALL"],
     "domains": [
       "cx.zhaozg.dpdns.org"
