@@ -36,7 +36,7 @@ const V6_KEYS = ['ip2region_v6_part1', 'ip2region_v6_part2'];
 const VERSION_KEY = 'ip2region_version';
 const GITHUB_OWNER = 'lionsoul2014';
 const GITHUB_REPO = 'ip2region';
-const KV_NAMESPACE_TITLE = 'city-gate-IP2REGION';
+const KV_NAMESPACE_TITLE = process.env.KV_NAMESPACE_TITLE || 'city-gate-IP2REGION';
 const KV_PLACEHOLDER = 'PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID';
 
 // KV 单 value 最大 25MiB（留 2MiB 余量，官方限制 27MiB）

@@ -1,0 +1,82 @@
+name = "city-gate-2"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# ── 账户2 Worker — 冗余容灾实例 ──────────────────────
+# 与 city-gate 共享同一份 worker.js 代码（通过相对路径引用 ../shared/）
+# 域名使用 zhaozg.de5.net Zone，Pages 源站使用账户2的 Pages 项目
+# KV 绑定账户2自己的 IP2REGION namespace
+
+# ── KV 绑定 ──────────────────────────────────────────
+# 账户2独立的 KV namespace，部署时 CI 会自动注入 id
+[[kv_namespaces]]
+binding = "IP2REGION"
+id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
+
+# 路由配置 — 账户2的域名绑定到 zhaozg.de5.net Zone
+[[routes]]
+pattern = "sg.zhaozg.de5.net/*"
+zone_name = "zhaozg.de5.net"
+
+[[routes]]
+pattern = "books.zhaozg.de5.net/*"
+zone_name = "zhaozg.de5.net"
+
+[[routes]]
+pattern = "bible.zhaozg.de5.net/*"
+zone_name = "zhaozg.de5.net"
+
+[[routes]]
+pattern = "cx.zhaozg.de5.net/*"
+zone_name = "zhaozg.de5.net"
+
+[[routes]]
+pattern = "sg-resource.zhaozg.de5.net/*"
+zone_name = "zhaozg.de5.net"
+
+
+# 环境变量 — 账户2的域名组配置，origin 指向账户2的 Pages 项目
+# GATE_KEY 通过 wrangler secret 设置（与账户1共享同一密钥）
+[vars]
+DOMAIN_CONFIG_JSON = """
+[
+  {
+    "origin": "https://sg-7gj.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "sg.zhaozg.de5.net"
+    ]
+  },
+  {
+    "origin": "https://books-89r.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "books.zhaozg.de5.net"
+    ]
+  },
+  {
+    "origin": "https://bible-2o8.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "bible.zhaozg.de5.net"
+    ]
+  },
+  {
+    "origin": "https://cx-1wd.pages.dev",
+    "cities": ["ALL"],
+    "domains": [
+      "cx.zhaozg.de5.net"
+    ]
+  },
+  {
+    "origin": "https://sg-resource.pages.dev",
+    "cities": ["ALL"],
+    "domains": [
+      "sg-resource.zhaozg.de5.net"
+    ]
+  }
+]
+"""

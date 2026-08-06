@@ -30,5 +30,6 @@ jobs:
       - name: 同步 CNAME 记录
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
         run: node scripts/sync-cname.js
