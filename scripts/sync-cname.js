@@ -36,16 +36,16 @@ const TOKEN_MAP = {
 // 所有域名将按轮询方式从中分配，同一服务的不同域名自然分散到不同优选域名
 const CNAME_POOL = [
   'cf.090227.xyz',
-  'anycubic.com',
   'saas.sin.fan',
-  'cloudflare.182682.xyz',
-  'cu.877774.xyz',
-  'mfa.gov.ua',
-  'www.shopify.com',
+  'cf.877774.xyz',
+  'cloudflare.seeck.cn',
+  'cf.cloudflare.182682.xyz',
   '1.cf.3666888.xyz',
+  'anycubic.com',
+  'www.shopify.com',
   'cf.yfjc.sbs',
   'eii.at',
-  'cdn.wzkf88.com'
+  'mfa.gov.ua'
 ];
 
 // ── Zone 配置 ─────────────────────────────────────────
@@ -198,7 +198,8 @@ async function validatePool(pool) {
 }
 
 // ── 分配计划生成 ─────────────────────────────────────────
-// 将所有 FQDN 展平，按顺序从有效优选域名池轮询分配
+// 每个 zone 独立从池的 index 0 开始轮询分配
+// 同一服务在不同 zone 会指向不同优选域名
 async function buildAssignmentPlan() {
   // 第0步：检测优选域名池有效性
   const { valid: validPool } = await validatePool(CNAME_POOL);
@@ -207,28 +208,20 @@ async function buildAssignmentPlan() {
     throw new Error('所有优选域名均无效，无法继续同步！');
   }
 
-  // 第1步：按 zone 顺序展开所有 FQDN
-  const allFqdns = [];
+  // 第1步：按 zone 独立轮询分配
+  const assignments = [];
   for (const zone of ZONE_MAP) {
-    for (const name of zone.names) {
-      allFqdns.push({
-        fqdn: `${name}.${zone.zoneName}`,
+    for (let i = 0; i < zone.names.length; i++) {
+      const poolIndex = i % validPool.length;
+      assignments.push({
+        fqdn: `${zone.names[i]}.${zone.zoneName}`,
         zoneName: zone.zoneName,
-        name,
+        name: zone.names[i],
         tokenKey: zone.tokenKey,
+        target: validPool[poolIndex],
+        poolIndex,
       });
     }
-  }
-
-  // 第2步：轮询分配优选域名（仅从有效池）
-  const assignments = [];
-  for (let i = 0; i < allFqdns.length; i++) {
-    const poolIndex = i % validPool.length;
-    assignments.push({
-      ...allFqdns[i],
-      target: validPool[poolIndex],
-      poolIndex,
-    });
   }
 
   return assignments;
