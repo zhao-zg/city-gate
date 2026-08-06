@@ -78,7 +78,9 @@ DOMAIN_CONFIG_JSON = """
       "sg.07170501.xyz",
       "sg.bxg.dpdns.org",
       "sg.zhaozg.dpdns.org",
-      "sg.zhaozg.cloudns.org"
+      "sg.zhaozg.cloudns.org",
+      "sg.1189.de5.net",
+      "sg.zzg.cc.cd"
     ]
   },
   {
@@ -88,7 +90,9 @@ DOMAIN_CONFIG_JSON = """
     "domains": [
       "books.07170501.xyz",
       "books.1189.dpdns.org",
-      "books.zhaozg.dpdns.org"
+      "books.zhaozg.dpdns.org",
+      "books.1189.de5.net",
+      "books.zzg.cc.cd"
     ]
   },
   {
@@ -98,21 +102,27 @@ DOMAIN_CONFIG_JSON = """
     "domains": [
       "bible.zhaozg.dpdns.org",
       "bible.07170501.xyz",
-      "bible.1189.dpdns.org"
+      "bible.1189.dpdns.org",
+      "bible.1189.de5.net",
+      "bible.zzg.cc.cd"
     ]
   },
   {
     "origin": "https://cx-7ai.pages.dev",
     "cities": ["ALL"],
     "domains": [
-      "cx.zhaozg.dpdns.org"
+      "cx.zhaozg.dpdns.org",
+      "cx.1189.de5.net",
+      "cx.zzg.cc.cd"
     ]
   },
   {
     "origin": "https://sg-resource-3ld.pages.dev",
     "cities": ["ALL"],
     "domains": [
-      "sg-resource.zhaozg.dpdns.org"
+      "sg-resource.zhaozg.dpdns.org",
+      "sg-resource.1189.de5.net",
+      "sg-resource.zzg.cc.cd"
     ]
   }
 ]

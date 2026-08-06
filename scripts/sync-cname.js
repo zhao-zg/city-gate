@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 /**
- * Cloudflare DNS CNAME 同步脚本（多账户版）
+ * Cloudflare DNS CNAME 同步脚本（多账户版 + 优选域名池轮询分配）
  *
- * 根据 CNAME_MAP 配置，自动为指定 zone 下的域名设置 CNAME 记录：
- *   - 如果已存在 CNAME 且目标不是优选域名 → 删除旧记录，新建
- *   - 如果已存在 CNAME 且目标已是优选域名 → 跳过
- *   - 如果不存在 CNAME → 新建记录
+ * 核心改进：同一服务的不同域名指向不同的优选域名，实现容灾分散。
+ *   - 定义优选域名池（多个优选域名）
+ *   - 将所有 FQDN 展平后按顺序轮流分配池中的优选域名
+ *   - 同一服务的不同域名自然分配到不同优选域名
+ *
+ * 同步策略（三路判断）：
+ *   - 已存在 CNAME 且目标已是分配的优选域名 → 跳过
+ *   - 已存在 CNAME 但目标不是分配的优选域名 → 删除旧记录，新建
+ *   - 不存在 CNAME → 新建
  *
  * 支持多账户：每个 zone 配置可指定不同的 API Token（用于跨账户 DNS 操作）
  *
@@ -22,30 +27,212 @@
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
 // ── 多账户 Token 映射 ─────────────────────────────────────
-// zone 配置中可通过 tokenKey 指定使用哪个环境变量中的 Token
 const TOKEN_MAP = {
   default: process.env.CLOUDFLARE_API_TOKEN,
   account2: process.env.CLOUDFLARE_API_TOKEN_2,
 };
 
-// ── CNAME 映射配置 ─────────────────────────────────────
-// 每个 zone 下的子域名前缀列表 → 指向的优选域名（CNAME 目标）
-// tokenKey: 对应 TOKEN_MAP 中的 key，不设则用 default
-// 后续新增优选域名只需在此数组中添加一条即可
-const CNAME_MAP = [
+// ── 优选域名池 ─────────────────────────────────────────
+// 所有域名将按轮询方式从中分配，同一服务的不同域名自然分散到不同优选域名
+const CNAME_POOL = [
+  'cf.090227.xyz',
+  'anycubic.com',
+  'saas.sin.fan',
+  'cloudflare.182682.xyz',
+  'cu.877774.xyz',
+  'mfa.gov.ua',
+  'www.shopify.com',
+  '1.cf.3666888.xyz',
+  'cf.yfjc.sbs',
+  'eii.at',
+  'cdn.wzkf88.com'
+];
+
+// ── Zone 配置 ─────────────────────────────────────────
+// 每个zone列出子域名前缀，target 由脚本自动从 CNAME_POOL 轮询分配
+const ZONE_MAP = [
   {
     zoneName: 'zhaozg.dpdns.org',
-    target: 'saas.sin.fan',
     names: ['sg', 'books', 'bible', 'cx', 'sg-resource'],
   },
   // 账户2 Zone
   {
     zoneName: 'zhaozg.de5.net',
-    target: 'saas.sin.fan',
     names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
     tokenKey: 'account2',
   },
 ];
+
+// ── 优选域名有效性检测 ─────────────────────────────────────
+// 检测维度：DNS 解析（A/CNAME 记录）+ HTTPS 连通性
+// 无效域名自动剔除，不参与轮询分配
+
+const dns = require('dns');
+const POOL_CHECK_TIMEOUT = 5000;  // 单个优选域名检测超时（ms）
+const POOL_CHECK_HTTPS = false;   // HTTPS 连通检测（仅警告，不影响有效性判定）
+
+/**
+ * DNS 解析检测（优先用 Node.js 内置 dns 模块，失败回退 DoH）
+ */
+async function checkDns(domain) {
+  // ── 主路径：Node.js dns.resolve4 ──
+  try {
+    await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
+    return { ok: true };
+  } catch (err) {
+    if (err.code === 'ENOTFOUND') {
+      return { ok: false, reason: 'NXDOMAIN（域名不存在）' };
+    }
+    // 其他 DNS 错误（超时、SERVFAIL 等），不直接判定无效，回退 DoH
+  }
+
+  // ── 回退：Cloudflare DoH ──
+  try {
+    const dohUrl = `https://cloudflare-dns.com/dns-query?name=${domain}&type=A`;
+    const dohRes = await fetch(dohUrl, {
+      headers: { Accept: 'application/dns-json' },
+      signal: AbortSignal.timeout(POOL_CHECK_TIMEOUT),
+    });
+    const dohJson = await dohRes.json();
+
+    if (dohJson.Status === 3) {
+      return { ok: false, reason: 'NXDOMAIN（域名不存在）' };
+    }
+    const hasAnswer = dohJson.Answer?.length > 0;
+    if (!hasAnswer && dohJson.Status !== 0) {
+      return { ok: false, reason: `DNS RCODE=${dohJson.Status}` };
+    }
+    return { ok: true };
+  } catch {
+    // DNS 和 DoH 都不确定，保守视为有效（避免误剔除）
+    return { ok: true, reason: 'DNS 不确定，保守视为有效' };
+  }
+}
+
+/** Promise 包装 dns.resolve4，带超时 */
+function dnsResolve4(domain, timeout) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('DNS timeout')), timeout);
+    dns.resolve4(domain, (err, addrs) => {
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(addrs);
+    });
+  });
+}
+
+/**
+ * HTTPS 连通性检测
+ */
+async function checkHttps(domain) {
+  try {
+    await fetch(`https://${domain}/`, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(POOL_CHECK_TIMEOUT),
+    });
+    // 任何响应都算连通（403/503 也说明网络通了）
+    return { ok: true };
+  } catch (e) {
+    const msg = e.cause?.code || e.message || '';
+    // 证书错误：DNS 已通，CNAME 层面仍有效
+    if (msg.includes('CERT') || msg.includes('certificate') || msg.includes('UNABLE_TO_VERIFY')) {
+      return { ok: true, reason: 'HTTPS 证书不匹配（不影响 CNAME）' };
+    }
+    // 连接被拒/超时
+    return { ok: false, reason: `HTTPS 连接失败: ${msg.slice(0, 60)}` };
+  }
+}
+
+/**
+ * 检测单个优选域名是否有效
+ * 1. DNS 解析：能解析出 A 记录
+ * 2. HTTPS 连通：能建立 TLS 连接（可选）
+ */
+async function checkPoolDomain(domain) {
+  const dnsResult = await checkDns(domain);
+  if (!dnsResult.ok) {
+    return { ok: false, reason: dnsResult.reason };
+  }
+
+  // HTTPS 检测仅作参考，不决定有效性
+  if (POOL_CHECK_HTTPS) {
+    const httpsResult = await checkHttps(domain);
+    if (!httpsResult.ok) {
+      return { ok: true, reason: `DNS 正常，HTTPS 不可达（仅警告）: ${httpsResult.reason}` };
+    }
+    return { ok: true, reason: httpsResult.reason };
+  }
+
+  return { ok: true, reason: dnsResult.reason };
+}
+
+/**
+ * 并发检测优选域名池，返回有效域名列表和检测报告
+ */
+async function validatePool(pool) {
+  console.log('\n── 优选域名池有效性检测 ──');
+
+  const results = await Promise.all(
+    pool.map(async (domain) => {
+      const result = await checkPoolDomain(domain);
+      const status = result.ok ? '✓' : '✗';
+      const reason = result.reason || '';
+      console.log(`  ${status}  ${domain.padEnd(32)} ${reason ? '— ' + reason : ''}`);
+      return { domain, ...result };
+    })
+  );
+
+  const valid = results.filter(r => r.ok).map(r => r.domain);
+  const invalid = results.filter(r => !r.ok);
+
+  if (invalid.length > 0) {
+    console.log(`\n  ⚠  ${invalid.length} 个优选域名无效，已从池中剔除:`);
+    for (const r of invalid) {
+      console.log(`     - ${r.domain}: ${r.reason}`);
+    }
+  }
+  console.log(`  池大小: ${pool.length} → ${valid.length}（剔除 ${pool.length - valid.length}）`);
+
+  return { valid, invalid };
+}
+
+// ── 分配计划生成 ─────────────────────────────────────────
+// 将所有 FQDN 展平，按顺序从有效优选域名池轮询分配
+async function buildAssignmentPlan() {
+  // 第0步：检测优选域名池有效性
+  const { valid: validPool } = await validatePool(CNAME_POOL);
+
+  if (validPool.length === 0) {
+    throw new Error('所有优选域名均无效，无法继续同步！');
+  }
+
+  // 第1步：按 zone 顺序展开所有 FQDN
+  const allFqdns = [];
+  for (const zone of ZONE_MAP) {
+    for (const name of zone.names) {
+      allFqdns.push({
+        fqdn: `${name}.${zone.zoneName}`,
+        zoneName: zone.zoneName,
+        name,
+        tokenKey: zone.tokenKey,
+      });
+    }
+  }
+
+  // 第2步：轮询分配优选域名（仅从有效池）
+  const assignments = [];
+  for (let i = 0; i < allFqdns.length; i++) {
+    const poolIndex = i % validPool.length;
+    assignments.push({
+      ...allFqdns[i],
+      target: validPool[poolIndex],
+      poolIndex,
+    });
+  }
+
+  return assignments;
+}
 
 // ── 工具函数 ──────────────────────────────────────────
 
@@ -104,97 +291,126 @@ async function createCnameRecord(zoneId, name, target, tokenKey, proxied = false
   });
 }
 
+// ── 打印分配计划 ─────────────────────────────────────────
+
+function printAssignmentPlan(assignments) {
+  console.log('\n┌──────────────────────────────────────────────────────────────┐');
+  console.log('│  CNAME 分配计划（轮询分配）                                    │');
+  console.log('├──────────────────────────────────────────────────────────────┤');
+  console.log('│  FQDN                              →  优选域名              │');
+  console.log('├──────────────────────────────────────────────────────────────┤');
+  for (const a of assignments) {
+    console.log(`│  ${a.fqdn.padEnd(34)} →  ${a.target.padEnd(24)} │`);
+  }
+  console.log('└──────────────────────────────────────────────────────────────┘');
+
+  // 按优选域名分组统计
+  const byTarget = {};
+  for (const a of assignments) {
+    byTarget[a.target] = (byTarget[a.target] || 0) + 1;
+  }
+  console.log('\n  优选域名分配统计:');
+  for (const [target, count] of Object.entries(byTarget).sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${target.padEnd(30)} × ${count}`);
+  }
+}
+
 // ── 主逻辑 ──────────────────────────────────────────
 
-async function processZone(cfg) {
-  const { zoneName, target, names, tokenKey } = cfg;
+async function processAssignment(assignments) {
   const dryRun = process.env.DRY_RUN === '1';
 
-  console.log(`\n━━━ Zone: ${zoneName} → ${target}${tokenKey ? ` (账户: ${tokenKey})` : ''} ━━━`);
-
-  let zoneId;
-  try {
-    zoneId = await getZoneId(zoneName, tokenKey);
-  } catch (e) {
-    console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
-    return { errors: 1, created: 0, deleted: 0, skipped: 0 };
+  // 按 zone 分组处理
+  const zoneGroups = {};
+  for (const a of assignments) {
+    if (!zoneGroups[a.zoneName]) {
+      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, items: [] };
+    }
+    zoneGroups[a.zoneName].items.push(a);
   }
 
-  const stats = { errors: 0, created: 0, deleted: 0, skipped: 0 };
+  let totalStats = { errors: 0, created: 0, deleted: 0, skipped: 0 };
 
-  for (const name of names) {
-    const fqdn = `${name}.${zoneName}`;
-    console.log(`\n  ▸ ${fqdn}`);
+  for (const [zoneName, group] of Object.entries(zoneGroups)) {
+    const tokenKey = group.tokenKey;
+    console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''} ━━━`);
 
+    let zoneId;
     try {
-      const records = await getDnsRecords(zoneId, fqdn, tokenKey);
-      const cnameRecords = records.filter(r => r.type === 'CNAME');
-
-      if (cnameRecords.length === 0) {
-        // 无 CNAME 记录，直接创建
-        console.log(`    无 CNAME 记录 → 创建 CNAME → ${target}`);
-        if (!dryRun) {
-          await createCnameRecord(zoneId, fqdn, target, tokenKey);
-        }
-        stats.created++;
-      } else {
-        // 已有 CNAME 记录
-        const matchTarget = cnameRecords.filter(r => r.content === target);
-        const mismatchTarget = cnameRecords.filter(r => r.content !== target);
-
-        if (matchTarget.length > 0 && mismatchTarget.length === 0) {
-          // 已存在正确的 CNAME，跳过
-          console.log(`    CNAME 已指向 ${target} → 跳过`);
-          stats.skipped++;
-        } else {
-          // 存在不指向优选域名的 CNAME，删除后重建
-          for (const rec of mismatchTarget) {
-            console.log(`    删除旧 CNAME → ${rec.content} (id: ${rec.id})`);
-            if (!dryRun) {
-              await deleteDnsRecord(zoneId, rec.id, tokenKey);
-            }
-            stats.deleted++;
-          }
-
-          if (matchTarget.length === 0) {
-            console.log(`    创建 CNAME → ${target}`);
-            if (!dryRun) {
-              await createCnameRecord(zoneId, fqdn, target, tokenKey);
-            }
-            stats.created++;
-          } else {
-            console.log(`    CNAME 已指向 ${target} → 跳过`);
-            stats.skipped++;
-          }
-        }
-      }
+      zoneId = await getZoneId(zoneName, tokenKey);
     } catch (e) {
-      console.error(`    ✗ 处理失败: ${e.message}`);
-      stats.errors++;
+      console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
+      totalStats.errors += group.items.length;
+      continue;
+    }
+
+    for (const a of group.items) {
+      const { fqdn, target } = a;
+      console.log(`\n  ▸ ${fqdn} → ${target}`);
+
+      try {
+        const records = await getDnsRecords(zoneId, fqdn, tokenKey);
+        const cnameRecords = records.filter(r => r.type === 'CNAME');
+
+        if (cnameRecords.length === 0) {
+          console.log(`    无 CNAME 记录 → 创建 CNAME → ${target}`);
+          if (!dryRun) {
+            await createCnameRecord(zoneId, fqdn, target, tokenKey);
+          }
+          totalStats.created++;
+        } else {
+          const matchTarget = cnameRecords.filter(r => r.content === target);
+          const mismatchTarget = cnameRecords.filter(r => r.content !== target);
+
+          if (matchTarget.length > 0 && mismatchTarget.length === 0) {
+            console.log(`    CNAME 已指向 ${target} → 跳过`);
+            totalStats.skipped++;
+          } else {
+            for (const rec of mismatchTarget) {
+              console.log(`    删除旧 CNAME → ${rec.content} (id: ${rec.id})`);
+              if (!dryRun) {
+                await deleteDnsRecord(zoneId, rec.id, tokenKey);
+              }
+              totalStats.deleted++;
+            }
+
+            if (matchTarget.length === 0) {
+              console.log(`    创建 CNAME → ${target}`);
+              if (!dryRun) {
+                await createCnameRecord(zoneId, fqdn, target, tokenKey);
+              }
+              totalStats.created++;
+            } else {
+              console.log(`    CNAME 已指向 ${target} → 跳过`);
+              totalStats.skipped++;
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`    ✗ 处理失败: ${e.message}`);
+        totalStats.errors++;
+      }
     }
   }
 
-  return stats;
+  return totalStats;
 }
 
 async function main() {
-  console.log('╔══════════════════════════════════════╗');
-  console.log('║  Cloudflare DNS CNAME 同步脚本        ║');
-  console.log('╚══════════════════════════════════════╝');
+  console.log('╔════════════════════════════════════════════════╗');
+  console.log('║  Cloudflare DNS CNAME 同步脚本（优选域名池版）    ║');
+  console.log('╚════════════════════════════════════════════════╝');
 
   if (process.env.DRY_RUN === '1') {
     console.log('\n⚠  DRY_RUN 模式 — 仅预览，不执行任何修改\n');
   }
 
-  let totalStats = { errors: 0, created: 0, deleted: 0, skipped: 0 };
+  // 生成并展示分配计划
+  const assignments = await buildAssignmentPlan();
+  printAssignmentPlan(assignments);
 
-  for (const cfg of CNAME_MAP) {
-    const stats = await processZone(cfg);
-    totalStats.created += stats.created;
-    totalStats.deleted += stats.deleted;
-    totalStats.errors += stats.errors;
-    totalStats.skipped += stats.skipped;
-  }
+  // 执行同步
+  const totalStats = await processAssignment(assignments);
 
   console.log('\n━━━ 汇总 ━━━');
   console.log(`  创建: ${totalStats.created}  删除: ${totalStats.deleted}  跳过: ${totalStats.skipped}  错误: ${totalStats.errors}`);
