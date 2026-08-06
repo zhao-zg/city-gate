@@ -70,7 +70,7 @@ zone_name = "zhaozg.dpdns.org"
 DOMAIN_CONFIG_JSON = """
 [
   {
-    "origin": "https://sg-7gj.pages.dev",
+    "origin": "https://sg-f3b.pages.dev",
     "cities": ["杭州", "Hangzhou"],
     "provinces": ["浙江", "Zhejiang"],
     "domains": [
@@ -82,7 +82,7 @@ DOMAIN_CONFIG_JSON = """
     ]
   },
   {
-    "origin": "https://books-89r.pages.dev",
+    "origin": "https://books-em3.pages.dev",
     "cities": ["杭州", "Hangzhou"],
     "provinces": ["浙江", "Zhejiang"],
     "domains": [
@@ -92,7 +92,7 @@ DOMAIN_CONFIG_JSON = """
     ]
   },
   {
-    "origin": "https://bible-2o8.pages.dev",
+    "origin": "https://bible-bka.pages.dev",
     "cities": ["杭州", "Hangzhou"],
     "provinces": ["浙江", "Zhejiang"],
     "domains": [
@@ -102,14 +102,14 @@ DOMAIN_CONFIG_JSON = """
     ]
   },
   {
-    "origin": "https://cx-1wd.pages.dev",
+    "origin": "https://cx-7ai.pages.dev,
     "cities": ["ALL"],
     "domains": [
       "cx.zhaozg.dpdns.org"
     ]
   },
   {
-    "origin": "https://sg-resource.pages.dev",
+    "origin": "https://sg-resource-3ld.pages.dev",
     "cities": ["ALL"],
     "domains": [
       "sg-resource.zhaozg.dpdns.org"
