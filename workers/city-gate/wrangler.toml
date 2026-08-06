@@ -10,7 +10,7 @@ compatibility_date = "2024-12-01"
 binding = "IP2REGION"
 id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 
-# 路由配置 — 每个域名绑定到此 Worker，城市规则在 worker.js 的 DOMAIN_CONFIG 中按域名配置
+# 路由配置 — 每个域名绑定到此 Worker，城市规则在下方 DOMAIN_CONFIG_JSON 中按域名配置
 [[routes]]
 pattern = "sg.1189.dpdns.org/*"
 zone_name = "1189.dpdns.org"
@@ -64,7 +64,56 @@ pattern = "sg-resource.zhaozg.dpdns.org/*"
 zone_name = "zhaozg.dpdns.org"
 
 
-# 环境变量（可选，DOMAIN_CONFIG_JSON 可覆盖代码内配置）
+# 环境变量 — DOMAIN_CONFIG_JSON 为唯一配置来源（域名组数组，worker.js 运行时展开为域名映射）
 # GATE_KEY 通过 wrangler secret 设置（与 cxapk Worker 共享同一密钥）
-# [vars]
-# DOMAIN_CONFIG_JSON = '{"sg.example.com":{"cities":["Beijing","Shanghai"],"origin":"https://sg.pages.dev"}}'
+[vars]
+DOMAIN_CONFIG_JSON = """
+[
+  {
+    "origin": "https://sg-7gj.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "sg.1189.dpdns.org",
+      "sg.07170501.xyz",
+      "sg.bxg.dpdns.org",
+      "sg.zhaozg.dpdns.org",
+      "sg.zhaozg.cloudns.org"
+    ]
+  },
+  {
+    "origin": "https://books-89r.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "books.07170501.xyz",
+      "books.1189.dpdns.org",
+      "books.zhaozg.dpdns.org"
+    ]
+  },
+  {
+    "origin": "https://bible-2o8.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": [
+      "bible.zhaozg.dpdns.org",
+      "bible.07170501.xyz",
+      "bible.1189.dpdns.org"
+    ]
+  },
+  {
+    "origin": "https://cx-1wd.pages.dev",
+    "cities": ["ALL"],
+    "domains": [
+      "cx.zhaozg.dpdns.org"
+    ]
+  },
+  {
+    "origin": "https://sg-resource.pages.dev",
+    "cities": ["ALL"],
+    "domains": [
+      "sg-resource.zhaozg.dpdns.org"
+    ]
+  }
+]
+"""

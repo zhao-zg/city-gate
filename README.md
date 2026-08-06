@@ -45,24 +45,32 @@ ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载�
 
 ## 域名组配置
 
-```js
-const DOMAIN_GROUPS = [
+配置通过环境变量 `DOMAIN_CONFIG_JSON` 提供（见 `wrangler.toml` 的 `[vars]`），使用**域名组数组**结构：同一源站/地区规则的域名共享一份配置，无需逐个重复。
+
+```json
+[
   {
-    origin: 'https://sg-7gj.pages.dev',
-    cities: ['杭州', 'Hangzhou'],  // 城市级匹配（中英文兼容）
-    domains: ['sg.1189.dpdns.org', ...],
+    "origin": "https://sg-7gj.pages.dev",
+    "cities": ["杭州", "Hangzhou"],
+    "provinces": ["浙江", "Zhejiang"],
+    "domains": ["sg.1189.dpdns.org", "sg.07170501.xyz"]
   },
   {
-    origin: 'https://bible-2o8.pages.dev',
-    cities: ['ALL'],  // 全部放行
-    domains: ['bible.zhaozg.dpdns.org', ...],
-  },
-];
+    "origin": "https://cx-1wd.pages.dev",
+    "cities": ["ALL"],
+    "domains": ["cx.zhaozg.dpdns.org"]
+  }
+]
 ```
+
+- `cities`：城市级匹配（中英文兼容），包含 `"ALL"` 时全部放行
+- `provinces`：ip2region 不可用时降级省级匹配
+- `domains`：共享以上规则的域名列表
+- `origin`：反向代理源站
 
 ## 添加新域名
 
-1. 在 `worker.js` 的 `DOMAIN_GROUPS` 中添加域名
+1. 在 `wrangler.toml` 的 `DOMAIN_CONFIG_JSON` 对应分组中追加域名
 2. 在 `wrangler.toml` 中添加路由
 3. 部署即可
 
@@ -140,6 +148,6 @@ CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
 
 | 变量 | Worker | 说明 |
 |------|--------|------|
-| `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串，覆盖代码内配置 |
+| `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串（域名组数组），唯一配置来源，格式见 wrangler.toml |
 | `PAGES_ORIGIN` | city-gate | 兜底源站地址 |
 | `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（如 `杭州,Hangzhou`） |

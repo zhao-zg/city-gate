@@ -2,7 +2,8 @@
  * Cloudflare Worker — IP访问限制网关（多域名版）
  *
  * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
- * 新增域名只需在 DOMAIN_GROUPS 中加一条，再在 wrangler.toml 加一条路由。
+ * 域名配置全部来自环境变量 DOMAIN_CONFIG_JSON（域名组数组，见 wrangler.toml [vars]），
+ * 新增域名只需在 JSON 对应分组中加一条，再在 wrangler.toml 加一条路由。
  *
  * 地理匹配策略（IPv4/IPv6 均支持）：
  * - ip2region 可用时：城市级精确匹配（如 杭州）
@@ -11,69 +12,6 @@
 
 import { denyPage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
-
-// ── 域名组配置 ────────────────────────────────────────
-// cities: 城市名（支持中文如 杭州、上海，和英文如 Hangzhou、Shanghai）
-// provinces: 省份名（ip2region 不可用时降级使用省级匹配）
-// 环境变量 DOMAIN_CONFIG_JSON 可覆盖此配置（JSON 字符串）
-const DOMAIN_GROUPS = [
-  {
-    origin: 'https://sg-7gj.pages.dev',
-    cities: ['杭州', 'Hangzhou'],
-    provinces: ['浙江', 'Zhejiang'],
-    domains: [
-      'sg.1189.dpdns.org',
-      'sg.07170501.xyz',
-      'sg.bxg.dpdns.org',
-      'sg.zhaozg.dpdns.org',
-      'sg.zhaozg.cloudns.org',
-    ],
-  },
-  {
-    origin: 'https://books-89r.pages.dev',
-    cities: ['杭州', 'Hangzhou'],
-    provinces: ['浙江', 'Zhejiang'],
-    domains: [
-      'books.07170501.xyz',
-      'books.1189.dpdns.org',
-      'books.zhaozg.dpdns.org'
-    ],
-  },
-  {
-    origin: 'https://bible-2o8.pages.dev',
-    cities: ['杭州', 'Hangzhou'],
-    provinces: ['浙江', 'Zhejiang'],
-    domains: [
-      'bible.zhaozg.dpdns.org',
-      'bible.07170501.xyz',
-      'bible.1189.dpdns.org'
-    ],
-  },
-  {
-    origin: 'https://cx-1wd.pages.dev',
-    cities: ['ALL'],
-    domains: [
-      'cx.zhaozg.dpdns.org'
-    ],
-  },
-  {
-    origin: 'https://sg-resource.pages.dev',
-    cities: ['ALL'],
-    domains: [
-      'sg-resource.zhaozg.dpdns.org'
-    ],
-  }
-];
-
-// ── 构建域名查找表 ────────────────────────────────────
-const DOMAIN_CONFIG = {};
-for (const group of DOMAIN_GROUPS) {
-  const cities = group.cities || [];
-  const provinces = group.provinces || [];
-  for (const domain of group.domains) {
-    DOMAIN_CONFIG[domain] = { cities, provinces, origin: group.origin };
-  }
-}
 
 // ── Worker 入口 ───────────────────────────────────────
 
@@ -87,14 +25,31 @@ export default {
       await initIpLookup(env.IP2REGION);
     }
 
-    // 1. 加载配置：环境变量优先，否则用代码内配置
+    // 1. 加载配置：全部来自环境变量 DOMAIN_CONFIG_JSON
+    //    支持两种结构：
+    //    - 域名组数组：[{ origin, cities, provinces, domains: [...] }, ...]（推荐，共享配置免重复）
+    //    - 域名映射：{ "域名": { origin, cities, provinces }, ... }
+    //    缺失或解析失败时返回 500，避免网关静默失效放行所有请求
     let config;
     try {
-      config = env.DOMAIN_CONFIG_JSON
-        ? JSON.parse(env.DOMAIN_CONFIG_JSON)
-        : DOMAIN_CONFIG;
+      config = JSON.parse(env.DOMAIN_CONFIG_JSON);
     } catch {
-      config = DOMAIN_CONFIG;
+      return new Response('网关配置错误：环境变量 DOMAIN_CONFIG_JSON 缺失或不是合法 JSON', {
+        status: 500,
+      });
+    }
+
+    // 域名组数组结构 → 展开成 域名 → 配置 映射
+    if (Array.isArray(config)) {
+      const domainMap = {};
+      for (const group of config) {
+        const cities = group.cities || [];
+        const provinces = group.provinces || [];
+        for (const domain of group.domains || []) {
+          domainMap[domain] = { cities, provinces, origin: group.origin };
+        }
+      }
+      config = domainMap;
     }
 
     // 2. 查找当前域名的地理配置和源站
