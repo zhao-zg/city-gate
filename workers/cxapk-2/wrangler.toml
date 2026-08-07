@@ -13,7 +13,7 @@ compatibility_date = "2024-12-01"
 binding = "IP2REGION"
 id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 
-# 路由配置
+# 路由配置（无 DOMAIN_CONFIG_JSON，手动维护）
 [[routes]]
 pattern = "apk.zhaozg.de5.net/*"
 zone_name = "zhaozg.de5.net"

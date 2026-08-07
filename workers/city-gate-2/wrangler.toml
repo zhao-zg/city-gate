@@ -13,70 +13,41 @@ compatibility_date = "2024-12-01"
 binding = "IP2REGION"
 id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 
-# 路由配置 — 账户2的域名绑定到 zhaozg.de5.net Zone
-[[routes]]
-pattern = "sg.zhaozg.de5.net/*"
-zone_name = "zhaozg.de5.net"
+# 路由配置 — CI 部署时由 scripts/generate-routes.js 从 DOMAIN_CONFIG_JSON 动态生成，仓库中不保留
 
-[[routes]]
-pattern = "books.zhaozg.de5.net/*"
-zone_name = "zhaozg.de5.net"
-
-[[routes]]
-pattern = "bible.zhaozg.de5.net/*"
-zone_name = "zhaozg.de5.net"
-
-[[routes]]
-pattern = "cx.zhaozg.de5.net/*"
-zone_name = "zhaozg.de5.net"
-
-[[routes]]
-pattern = "sg-resource.zhaozg.de5.net/*"
-zone_name = "zhaozg.de5.net"
-
-
-# 环境变量 — 账户2的域名组配置，origin 指向账户2的 Pages 项目
-# GATE_KEY 通过 wrangler secret 设置（与账户1共享同一密钥）
 [vars]
 DOMAIN_CONFIG_JSON = """
-[
-  {
-    "origin": "https://sg-7gj.pages.dev",
-    "cities": ["杭州", "Hangzhou"],
-    "provinces": ["浙江", "Zhejiang"],
-    "domains": [
-      "sg.zhaozg.de5.net"
-    ]
-  },
-  {
-    "origin": "https://books-89r.pages.dev",
-    "cities": ["杭州", "Hangzhou"],
-    "provinces": ["浙江", "Zhejiang"],
-    "domains": [
-      "books.zhaozg.de5.net"
-    ]
-  },
-  {
-    "origin": "https://bible-2o8.pages.dev",
-    "cities": ["杭州", "Hangzhou"],
-    "provinces": ["浙江", "Zhejiang"],
-    "domains": [
-      "bible.zhaozg.de5.net"
-    ]
-  },
-  {
-    "origin": "https://cx-1wd.pages.dev",
-    "cities": ["ALL"],
-    "domains": [
-      "cx.zhaozg.de5.net"
-    ]
-  },
-  {
-    "origin": "https://sg-resource.pages.dev",
-    "cities": ["ALL"],
-    "domains": [
-      "sg-resource.zhaozg.de5.net"
-    ]
-  }
-]
+{
+  "zones": ["zhaozg.de5.net"],
+  "groups": [
+    {
+      "prefix": "sg",
+      "origin": "https://sg-7gj.pages.dev",
+      "cities": ["杭州", "Hangzhou"],
+      "provinces": ["浙江", "Zhejiang"]
+    },
+    {
+      "prefix": "books",
+      "origin": "https://books-89r.pages.dev",
+      "cities": ["杭州", "Hangzhou"],
+      "provinces": ["浙江", "Zhejiang"]
+    },
+    {
+      "prefix": "bible",
+      "origin": "https://bible-2o8.pages.dev",
+      "cities": ["杭州", "Hangzhou"],
+      "provinces": ["浙江", "Zhejiang"]
+    },
+    {
+      "prefix": "cx",
+      "origin": "https://cx-1wd.pages.dev",
+      "cities": ["ALL"]
+    },
+    {
+      "prefix": "sg-resource",
+      "origin": "https://sg-resource.pages.dev",
+      "cities": ["ALL"]
+    }
+  ]
+}
 """

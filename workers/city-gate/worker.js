@@ -26,9 +26,11 @@ export default {
     }
 
     // 1. 加载配置：全部来自环境变量 DOMAIN_CONFIG_JSON
-    //    支持两种结构：
-    //    - 域名组数组：[{ origin, cities, provinces, domains: [...] }, ...]（推荐，共享配置免重复）
-    //    - 域名映射：{ "域名": { origin, cities, provinces }, ... }
+    //    支持三种结构：
+    //    - zones + prefixes：{ zones: [...], groups: [{ prefix, origin, cities, provinces }, ...] }
+    //      运行时自动展开 prefix.zone 为完整域名（推荐，简洁免重复）
+    //    - 域名组数组：[{ origin, cities, provinces, domains: [...] }, ...]（旧格式，仍兼容）
+    //    - 域名映射：{ "域名": { origin, cities, provinces }, ... }（旧格式，仍兼容）
     //    缺失或解析失败时返回 500，避免网关静默失效放行所有请求
     let config;
     try {
@@ -39,8 +41,22 @@ export default {
       });
     }
 
-    // 域名组数组结构 → 展开成 域名 → 配置 映射
-    if (Array.isArray(config)) {
+    // zones + prefixes 结构 → 展开成 域名 → 配置 映射
+    if (config.zones && Array.isArray(config.groups)) {
+      const domainMap = {};
+      for (const group of config.groups) {
+        const cities = group.cities || [];
+        const provinces = group.provinces || [];
+        const zones = group.zones || config.zones; // 组级可覆盖 zone 列表
+        for (const zone of zones) {
+          const domain = `${group.prefix}.${zone}`;
+          domainMap[domain] = { cities, provinces, origin: group.origin };
+        }
+      }
+      config = domainMap;
+    }
+    // 域名组数组结构 → 展开成 域名 → 配置 映射（旧格式兼容）
+    else if (Array.isArray(config)) {
       const domainMap = {};
       for (const group of config) {
         const cities = group.cities || [];
