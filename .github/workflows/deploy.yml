@@ -101,7 +101,7 @@ jobs:
           node-version: '20'
       - name: 安装 wrangler
         run: npm install -g wrangler
-      - name: 生成 routes
+      - name: 生成部署配置
         run: node scripts/generate-routes.js
 
       - name: 注入 KV namespace ID（账户1）
@@ -124,7 +124,7 @@ jobs:
           " 2>/dev/null || true)
           fi
           if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
-            for toml in workers/city-gate/wrangler.toml workers/cxapk/wrangler.toml; do
+            for toml in workers/city-gate/wrangler.generated.toml workers/cxapk/wrangler.generated.toml; do
               if [ -f "$toml" ] && grep -q "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" "$toml"; then
                 sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" "$toml"
                 echo "已注入 KV namespace id 到 $toml: $KV_ID"
@@ -150,7 +150,7 @@ jobs:
         run: |
           for worker in ${{ steps.workers.outputs.list }}; do
             echo "部署账户1/$worker ..."
-            if (cd "workers/$worker" && wrangler deploy); then
+            if (cd "workers/$worker" && wrangler deploy -c wrangler.generated.toml); then
               echo "✓ 账户1/$worker 部署成功"
             else
               echo "✗ 账户1/$worker 部署失败"
@@ -191,7 +191,7 @@ jobs:
       - name: 安装 wrangler
         if: steps.check.outputs.skip == 'false'
         run: npm install -g wrangler
-      - name: 生成 routes
+      - name: 生成部署配置
         if: steps.check.outputs.skip == 'false'
         run: node scripts/generate-routes.js
 
@@ -216,7 +216,7 @@ jobs:
           " 2>/dev/null || true)
           fi
           if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
-            for toml in workers/city-gate-2/wrangler.toml workers/cxapk-2/wrangler.toml; do
+            for toml in workers/city-gate-2/wrangler.generated.toml workers/cxapk-2/wrangler.generated.toml; do
               if [ -f "$toml" ] && grep -q "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" "$toml"; then
                 sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" "$toml"
                 echo "已注入 KV namespace id 到 $toml: $KV_ID"
@@ -244,7 +244,7 @@ jobs:
         run: |
           for worker in ${{ steps.workers.outputs.list }}; do
             echo "部署账户2/$worker ..."
-            if (cd "workers/$worker" && wrangler deploy); then
+            if (cd "workers/$worker" && wrangler deploy -c wrangler.generated.toml); then
               echo "✓ 账户2/$worker 部署成功"
             else
               echo "✗ 账户2/$worker 部署失败"

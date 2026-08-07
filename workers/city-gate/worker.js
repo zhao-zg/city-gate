@@ -2,8 +2,8 @@
  * Cloudflare Worker — IP访问限制网关（多域名版）
  *
  * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
- * 域名配置全部来自环境变量 DOMAIN_CONFIG_JSON（域名组数组，见 wrangler.toml [vars]），
- * 新增域名只需在 JSON 对应分组中加一条，再在 wrangler.toml 加一条路由。
+ * 域名配置全部来自环境变量 DOMAIN_CONFIG_JSON（见 wrangler.toml [vars]），
+ * 新增域名只需在 JSON 的 zones 或 groups 中添加，路由由 CI 自动生成。
  *
  * 地理匹配策略（IPv4/IPv6 均支持）：
  * - ip2region 可用时：城市级精确匹配（如 杭州）

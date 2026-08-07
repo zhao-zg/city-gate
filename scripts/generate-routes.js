@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /**
  * generate-routes.js
- * 从 wrangler.toml 的 DOMAIN_CONFIG_JSON 提取域名，自动生成 [[routes]] 段
+ * 从 wrangler.toml 的 DOMAIN_CONFIG_JSON 提取域名，生成 wrangler.generated.toml
+ *
+ * 原文件 wrangler.toml 完全不动，生成文件追加 [[routes]] 段
+ * CI 部署时使用: wrangler deploy -c wrangler.generated.toml
  *
  * 用法:
  *   node scripts/generate-routes.js [worker-dir ...]
@@ -9,12 +12,13 @@
  *
  * 支持两种 DOMAIN_CONFIG_JSON 格式：
  *   1. zones + prefixes（推荐）：{ zones: [...], groups: [{ prefix, origin, ... }] }
- *      自动展开 prefix.zone 为完整域名
  *   2. 旧格式 domains 数组：[{ domains: [...], ... }]
  */
 
 const fs = require('fs');
 const path = require('path');
+
+const GENERATED_SUFFIX = '.generated.toml';
 
 // ── 从 DOMAIN_CONFIG_JSON 展开完整域名列表 ───────────────
 function expandDomains(config) {
@@ -54,7 +58,6 @@ function parseDomainConfig(tomlText) {
 function generateRoutesTOML(domains) {
   const lines = [];
   for (const domain of domains) {
-    // zone = 去掉第一个子域后的部分
     const zone = domain.split('.').slice(1).join('.');
     lines.push(`[[routes]]`);
     lines.push(`pattern = "${domain}/*"`);
@@ -64,67 +67,52 @@ function generateRoutesTOML(domains) {
   return lines.join('\n') + '\n';
 }
 
-// ── 从 wrangler.toml 中提取已有的 routes 区域并替换 ─────
-function replaceRoutesInToml(tomlText, newRoutes) {
-  const newBlock = `# 路由配置 — 由 scripts/generate-routes.js 从 DOMAIN_CONFIG_JSON 自动生成，勿手动编辑\n${newRoutes}`;
-
-  // 匹配已有 routes 区域：注释行 + 连续的 [[routes]] 块
-  const routeBlockRegex = /(# 路由配置[^\n]*\n(?:\[\[routes\]\][^\n]*\n[^\n]*\n[^\n]*\n*)+)/;
-  const match = tomlText.match(routeBlockRegex);
-
-  if (match) {
-    return tomlText.replace(routeBlockRegex, newBlock);
+// ── 注入 routes 到 toml 文本（在 [vars] 之前插入）─────────
+function injectRoutes(tomlText, routesTOML) {
+  const insertPoint = '\n[vars]';
+  const idx = tomlText.indexOf(insertPoint);
+  if (idx === -1) {
+    // 没有 [vars]，追加到末尾
+    return tomlText + '\n' + routesTOML;
   }
-
-  // 匹配路由配置占位注释行（含"动态生成"或"自动生成"）
-  const commentOnlyRegex = /# 路由配置[^\n]*generate-routes[^\n]*\n/;
-  if (tomlText.match(commentOnlyRegex)) {
-    return tomlText.replace(commentOnlyRegex, newBlock);
-  }
-
-  // 没有找到已有的 routes 区域，在 [vars] 之前插入
-  const varsMatch = tomlText.match(/\n(\[vars\])/);
-  if (varsMatch) {
-    return tomlText.replace(/\n(\[vars\])/, '\n' + newBlock + '\n$1');
-  }
-
-  // 都没找到，追加到末尾
-  return tomlText + '\n' + newBlock;
+  return tomlText.slice(0, idx) + '\n' + routesTOML + tomlText.slice(idx);
 }
 
 // ── 处理单个 worker 目录 ─────────────────────────────────
 function processWorkerDir(dir) {
-  const tomlPath = path.join(dir, 'wrangler.toml');
-  if (!fs.existsSync(tomlPath)) {
+  const srcPath = path.join(dir, 'wrangler.toml');
+  const dstPath = path.join(dir, `wrangler${GENERATED_SUFFIX}`);
+
+  if (!fs.existsSync(srcPath)) {
     console.log(`跳过 ${dir}: wrangler.toml 不存在`);
     return;
   }
 
   console.log(`处理 ${dir} ...`);
-  const tomlText = fs.readFileSync(tomlPath, 'utf8');
+  const tomlText = fs.readFileSync(srcPath, 'utf8');
   const config = parseDomainConfig(tomlText);
 
   if (!config) {
-    console.log(`  无 DOMAIN_CONFIG_JSON，跳过`);
+    // 无 DOMAIN_CONFIG_JSON，直接复制原文件（cxapk 等需要保留手写 routes）
+    fs.writeFileSync(dstPath, tomlText, 'utf8');
+    console.log(`  无 DOMAIN_CONFIG_JSON，直接复制`);
     return;
   }
 
   const domains = expandDomains(config);
 
   if (domains.length === 0) {
-    console.log(`  DOMAIN_CONFIG_JSON 中无域名，跳过`);
+    fs.writeFileSync(dstPath, tomlText, 'utf8');
+    console.log(`  DOMAIN_CONFIG_JSON 中无域名，直接复制`);
     return;
   }
 
+  // 生成 routes 并注入到 [vars] 之前
   const routesTOML = generateRoutesTOML(domains);
-  const newToml = replaceRoutesInToml(tomlText, routesTOML);
+  const generated = injectRoutes(tomlText, routesTOML);
 
-  if (newToml !== tomlText) {
-    fs.writeFileSync(tomlPath, newToml, 'utf8');
-    console.log(`  已更新 ${domains.length} 条 routes`);
-  } else {
-    console.log(`  routes 已是最新，无需更新`);
-  }
+  fs.writeFileSync(dstPath, generated, 'utf8');
+  console.log(`  已生成 ${domains.length} 条 routes → ${path.basename(dstPath)}`);
 }
 
 // ── 主逻辑 ───────────────────────────────────────────────
