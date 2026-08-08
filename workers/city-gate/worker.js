@@ -10,8 +10,9 @@
  * - ip2region 不可用时：降级到 CF 省级代码匹配（如 浙江）
  */
 
-import { denyPage } from '../shared/deny-page.js';
+import { denyPage, denySchedulePage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
+import { isInOpenSchedule } from '../shared/schedule.js';
 
 // ── Worker 入口 ───────────────────────────────────────
 
@@ -50,7 +51,7 @@ export default {
         const zones = group.zones || config.zones; // 组级可覆盖 zone 列表
         for (const zone of zones) {
           const domain = `${group.prefix}.${zone}`;
-          domainMap[domain] = { cities, provinces, origin: group.origin };
+          domainMap[domain] = { cities, provinces, origin: group.origin, schedule: group.schedule || null };
         }
       }
       config = domainMap;
@@ -62,7 +63,7 @@ export default {
         const cities = group.cities || [];
         const provinces = group.provinces || [];
         for (const domain of group.domains || []) {
-          domainMap[domain] = { cities, provinces, origin: group.origin };
+          domainMap[domain] = { cities, provinces, origin: group.origin, schedule: group.schedule || null };
         }
       }
       config = domainMap;
@@ -73,6 +74,16 @@ export default {
     const allowedCities = domainCfg.cities || [];
     const allowedProvinces = domainCfg.provinces || [];
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
+
+    // 2.5 schedule 时间判断（优先于地理围栏）
+    if (domainCfg.schedule) {
+      if (!isInOpenSchedule(domainCfg.schedule)) {
+        return new Response(denySchedulePage(), {
+          status: 403,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+    }
 
     // 3. cities 包含 ALL 时全部放行
     if (allowedCities.some(c => c.toUpperCase() === 'ALL')) {
