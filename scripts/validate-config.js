@@ -49,7 +49,10 @@ function validateSchedule(schedule, prefix) {
           if (endMin <= startMin) {
             errors.push(`${prefix}: schedule.periods "${p}" 结束时间必须大于开始时间`);
           }
-          if (sh > 23 || sm > 59 || eh > 23 || em > 59) {
+          // 24:00 仅允许作为终值
+          const startValid = sh <= 23 && sm <= 59;
+          const endValid = (eh === 24 && em === 0) || (eh <= 23 && em <= 59);
+          if (!startValid || !endValid) {
             errors.push(`${prefix}: schedule.periods "${p}" 包含无效时间值`);
           }
         }

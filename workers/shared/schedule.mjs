@@ -7,7 +7,7 @@
 /**
  * 解析 "HH:MM" 格式字符串为当天分钟数
  * @param {string} hhmm — 如 "09:30"
- * @returns {number} 分钟数 0-1439
+ * @returns {number} 分钟数 0-1440（24:00=1440）
  * @throws {Error} 格式非法或数值越界
  */
 export function parseTime(hhmm) {
@@ -20,6 +20,10 @@ export function parseTime(hhmm) {
   }
   const hour = parseInt(m[1], 10);
   const minute = parseInt(m[2], 10);
+  // 允许 24:00 作为终值（全天终点），其余 24:xx 非法
+  if (hour === 24 && minute === 0) {
+    return 1440;
+  }
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
     throw new Error(`Invalid time format: ${hhmm}`);
   }

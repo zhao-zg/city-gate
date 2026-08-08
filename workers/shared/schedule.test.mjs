@@ -38,6 +38,14 @@ test('parseTime("23:59") → 1439', () => {
   assert.strictEqual(parseTime('23:59'), 1439);
 });
 
+test('parseTime("24:00") → 1440 (全天终点)', () => {
+  assert.strictEqual(parseTime('24:00'), 1440);
+});
+
+test('parseTime("24:01") → throws Error', () => {
+  assert.throws(() => parseTime('24:01'), Error);
+});
+
 test('parseTime("invalid") → throws Error', () => {
   assert.throws(() => parseTime('invalid'), Error);
 });
@@ -115,7 +123,13 @@ test('empty schedule: Wed 10:00 → true', () => {
   assert.strictEqual(isInOpenSchedule({}, now), true);
 });
 
-// ── Timezone tests ───────────────────────────────────
+test('periods=["00:00-24:00"] = 全天开放', () => {
+  const now = shanghaiDate('2026-01-07T03:00'); // Wed 03:00
+  assert.strictEqual(
+    isInOpenSchedule({ periods: ['00:00-24:00'] }, now),
+    true,
+  );
+});
 // America/New_York in January = EST (UTC-5)
 // 2026-01-05 is Monday
 
