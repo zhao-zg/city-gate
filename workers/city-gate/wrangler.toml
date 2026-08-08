@@ -18,8 +18,7 @@ DOMAIN_CONFIG_JSON = """
     {
       "prefix": "sg",
       "origin": "https://sg-f3b.pages.dev",
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"]
+      "cities": ["ALL"]
     },
     {
       "prefix": "books",
