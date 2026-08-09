@@ -10,7 +10,6 @@
  * - ip2region 不可用时：降级到 CF 省级代码匹配（如 浙江）
  */
 
-import { denyPage, denySchedulePage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 import { isInOpenSchedule } from '../shared/schedule.js';
 
@@ -70,7 +69,10 @@ export default {
     }
 
     // 2. 查找当前域名的地理配置和源站
-    const domainCfg = config[hostname] || {};
+    const domainCfg = config[hostname];
+    if (!domainCfg) {
+      return new Response('Forbidden', { status: 403 });
+    }
     const allowedCities = domainCfg.cities || [];
     const allowedProvinces = domainCfg.provinces || [];
     const origin = domainCfg.origin || env.PAGES_ORIGIN;
@@ -78,10 +80,7 @@ export default {
     // 2.5 schedule 时间判断（优先于地理围栏）
     if (domainCfg.schedule) {
       if (!isInOpenSchedule(domainCfg.schedule)) {
-        return new Response(denySchedulePage(), {
-          status: 403,
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        });
+        return new Response('Forbidden', { status: 403 });
       }
     }
 
@@ -90,10 +89,7 @@ export default {
       return proxyRequest(request, url, origin);
     }
 
-    // 4. 无地区限制时也放行
-    if (allowedCities.length === 0) {
-      return proxyRequest(request, url, origin);
-    }
+    // 4. 配置了 cities 但走完地理判断之前，无需额外判断
 
     // 5. IP 地理判断
     // 优先使用可信 Worker 传递的原始客户端 IP（X-Original-IP + X-Gate-Key 校验）
@@ -130,12 +126,7 @@ export default {
 
     // 6. 非允许地区返回 403
     if (!isAllowed) {
-      const reason = `${matchLevel ? '省级' : '城市'}匹配失败：${loc.city || '未知城市'}/${loc.province || '未知省份'}不在允许地区`;
-      const debugInfo = `IP: ${clientIP} | ip2region: ${loc.city}/${loc.province} | CF: ${cf.city || '?'}/${cf.region || '?'} | 匹配级别: ${matchLevel || 'none'}`;
-      return new Response(denyPage(loc.city, loc.province, loc.country, reason, loc.source, loc.isp, debugInfo), {
-        status: 403,
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      });
+      return new Response('Forbidden', { status: 403 });
     }
 
     // 7. 允许地区：反向代理到源站

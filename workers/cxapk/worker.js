@@ -11,7 +11,6 @@
  *   ALLOWED_PROVINCES— 允许的省份，逗号分隔（如 "浙江,Zhejiang"）
  */
 
-import { denyPage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // 域名源站列表（走域名，由 city-gate 做地理限制）
@@ -62,12 +61,7 @@ export default {
       }
 
       if (!isAllowed) {
-        const reason = `${matchLevel ? '省级' : '城市'}匹配失败：${loc.city || '未知城市'}/${loc.province || '未知省份'}不在允许地区`;
-        const debugInfo = `IP: ${clientIP} | ip2region: ${loc.city}/${loc.province} | CF: ${cf.city || '?'}/${cf.region || '?'} | 匹配级别: ${matchLevel || 'none'}`;
-        return new Response(denyPage(loc.city, loc.province, loc.country, reason, loc.source, loc.isp, debugInfo), {
-          status: 403,
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        });
+        return new Response('Forbidden', { status: 403 });
       }
     }
 

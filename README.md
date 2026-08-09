@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '7aea08d1-0a45-40c8-9df7-24ba94057293'
-  PropagateID: '7aea08d1-0a45-40c8-9df7-24ba94057293'
-  ReservedCode1: '5b7a5ad7-c4bb-4aa8-8ea1-885f950d35f8'
-  ReservedCode2: '5b7a5ad7-c4bb-4aa8-8ea1-885f950d35f8'
+  ProduceID: '353e0bda-7dcf-4c4e-b7e0-4caa7ef48a54'
+  PropagateID: '353e0bda-7dcf-4c4e-b7e0-4caa7ef48a54'
+  ReservedCode1: 'bcc4b043-e14c-499b-9025-f624db8990d5'
+  ReservedCode2: 'bcc4b043-e14c-499b-9025-f624db8990d5'
 ---
 
 # city-gate
@@ -18,9 +18,9 @@ AIGC:
 ```
 workers/
 ├── shared/
-│   ├── deny-page.js     # 共享 403 页面模板
 │   ├── ip2region.js     # ip2region xdb 查询器（Worker 适配版）
-│   └── ip-lookup.js     # IP 归属地统一封装层
+│   ├── ip-lookup.js     # IP 归属地统一封装层
+│   └── schedule.js      # 开放时段判断
 ├── city-gate/           # 城市访问网关
 │   ├── worker.js
 │   └── wrangler.toml

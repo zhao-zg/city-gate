@@ -5,7 +5,6 @@
  * 环境变量同 cxapk，详见 ../cxapk/worker.js 注释。
  */
 
-import { denyPage } from '../shared/deny-page.js';
 import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
 
 // 域名源站列表（账户2：走 zhaozg.de5.net 域名，由 city-gate-2 做地理限制）
@@ -55,12 +54,7 @@ export default {
       }
 
       if (!isAllowed) {
-        const reason = `${matchLevel ? '省级' : '城市'}匹配失败：${loc.city || '未知城市'}/${loc.province || '未知省份'}不在允许地区`;
-        const debugInfo = `IP: ${clientIP} | ip2region: ${loc.city}/${loc.province} | CF: ${cf.city || '?'}/${cf.region || '?'} | 匹配级别: ${matchLevel || 'none'}`;
-        return new Response(denyPage(loc.city, loc.province, loc.country, reason, loc.source, loc.isp, debugInfo), {
-          status: 403,
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        });
+        return new Response('Forbidden', { status: 403 });
       }
     }
 
