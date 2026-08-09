@@ -32,7 +32,7 @@ DOMAIN_CONFIG_JSON = """
     {
       "prefix": "bible",
       "origin": "https://bible-bka.pages.dev",
-      "cities": ["杭州", "Hangzhou"],
+      "cities": ["ALL"],
       "provinces": ["浙江", "Zhejiang"]
     },
     {
