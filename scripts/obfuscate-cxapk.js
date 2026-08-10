@@ -14,10 +14,9 @@ const path = require('path');
 const filePath = path.join(__dirname, '..', 'pages', 'cxapk', 'index.html');
 const html = fs.readFileSync(filePath, 'utf8');
 
-// 检测是否已经是混淆版：如果源码中没有明文域名，说明已混淆，跳过
-const domains = ['1189.dpdns.org','zhaozg.dpdns.org','1189.de5.net','zzg.cc.cd','1189.kdns.fr'];
-const leakedBefore = domains.filter(d => html.includes(d));
-if (leakedBefore.length === 0) {
+// 检测是否已经是混淆版：如果源码中没有任何明文域名，说明已混淆，跳过
+const PLAINTEXT_MARKER = '1189.dpdns.org';
+if (!html.includes(PLAINTEXT_MARKER)) {
   console.log('已是混淆版，跳过');
   process.exit(0);
 }
@@ -44,7 +43,8 @@ const result = Obfuscator.obfuscate(match[1], {
 const newHtml = html.replace(/<script>[\s\S]*?<\/script>/, '<script>\n' + result.getObfuscatedCode() + '\n</script>');
 fs.writeFileSync(filePath, newHtml, 'utf8');
 
-// 验证：检查输出文件中是否还有明文域名
+// 验证：检查输出文件中是否还有明文标记或域名
+const domains = ['1189.dpdns.org','zhaozg.dpdns.org','1189.de5.net','zhaozg.de5.net','zzg.cc.cd','1189.kdns.fr'];
 const leakedAfter = domains.filter(d => newHtml.includes(d));
 if (leakedAfter.length > 0) {
   console.error('泄露域名:', leakedAfter);
