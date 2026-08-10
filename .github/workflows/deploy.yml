@@ -280,7 +280,45 @@ jobs:
         run: |
           wrangler pages project create cxapk --production-branch=master || true
           wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
+
+  # ================================================================
+  #  Job：部署 Pages（cxapk 下载页）—— 账户2
+  # ================================================================
+  deploy-pages-2:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: 检查是否部署账户2
+        id: check
+        run: |
+          ACCOUNTS="${{ github.event.inputs.accounts || '1,2' }}"
+          if echo "$ACCOUNTS" | grep -qw "2"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "跳过账户2 Pages 部署"
+          fi
+      - name: 检出代码
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/checkout@v4
+      - name: 设置 Node.js
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 安装依赖
+        if: steps.check.outputs.skip == 'false'
+        run: npm install --prefix $RUNNER_TEMP/obf javascript-obfuscator
+      - name: 混淆 JS
+        if: steps.check.outputs.skip == 'false'
+        env:
+          NODE_PATH: ${{ runner.temp }}/obf/node_modules
+        run: node scripts/obfuscate-cxapk.js
+      - name: 安装 wrangler
+        if: steps.check.outputs.skip == 'false'
+        run: npm install -g wrangler
       - name: 部署 cxapk Pages（账户2）
+        if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
@@ -293,15 +331,17 @@ jobs:
   # ================================================================
   deploy-summary:
     runs-on: ubuntu-latest
-    needs: [deploy-account-1, deploy-account-2, deploy-pages]
+    needs: [deploy-account-1, deploy-account-2, deploy-pages, deploy-pages-2]
     if: always()
     steps:
       - name: 部署结果汇总
         run: |
           echo "━━━ 部署结果汇总 ━━━"
-          echo "账户1: ${{ needs.deploy-account-1.result }}"
-          echo "账户2: ${{ needs.deploy-account-2.result }}"
-          if [ "${{ needs.deploy-account-1.result }}" = "failure" ] || [ "${{ needs.deploy-account-2.result }}" = "failure" ] || [ "${{ needs.deploy-pages.result }}" = "failure" ]; then
+          echo "账户1 Workers: ${{ needs.deploy-account-1.result }}"
+          echo "账户2 Workers: ${{ needs.deploy-account-2.result }}"
+          echo "账户1 Pages: ${{ needs.deploy-pages.result }}"
+          echo "账户2 Pages: ${{ needs.deploy-pages-2.result }}"
+          if [ "${{ needs.deploy-account-1.result }}" = "failure" ] || [ "${{ needs.deploy-account-2.result }}" = "failure" ] || [ "${{ needs.deploy-pages.result }}" = "failure" ] || [ "${{ needs.deploy-pages-2.result }}" = "failure" ]; then
             echo "⚠ 有部署失败"
             exit 1
           fi
