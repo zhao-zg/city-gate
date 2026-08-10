@@ -41,10 +41,10 @@ const WORKER_TOKEN_KEYS = {
 };
 
 // ── 优选域名池 ─────────────────────────────────────────
-// 所有域名将按轮询方式从中分配，同一服务的不同域名自然分散到不同优选域名
+// 每个 zone 分配池中一个域名，zone 内所有子域名指向同一优选域名
+// 注意：saas.sin.fan / eii.at 会触发 CF 1034（CNAME 链嵌套 SaaS），已移除
 const CNAME_POOL = [
   'cf.090227.xyz',
-  'saas.sin.fan',
   'cf.877774.xyz',
   'cloudflare.seeck.cn',
   'cf.cloudflare.182682.xyz',
@@ -52,7 +52,6 @@ const CNAME_POOL = [
   'anycubic.com',
   'www.shopify.com',
   'cf.yfjc.sbs',
-  'eii.at',
   'mfa.gov.ua'
 ];
 
@@ -278,8 +277,8 @@ async function validatePool(pool) {
 }
 
 // ── 分配计划生成 ─────────────────────────────────────────
-// 每个 zone 独立从池的 index 0 开始轮询分配
-// 同一服务在不同 zone 会指向不同优选域名
+// 每个 zone 从池中轮询分配一个优选域名，zone 内所有子域名指向同一目标
+// 不同 zone 会分散到不同优选域名，实现容灾
 async function buildAssignmentPlan() {
   // 第0步：自动从 wrangler.toml 提取 Zone 配置
   console.log('\n── 自动检测 Zone 配置 ──');
@@ -296,18 +295,19 @@ async function buildAssignmentPlan() {
     throw new Error('所有优选域名均无效，无法继续同步！');
   }
 
-  // 第1步：按 zone 独立轮询分配
+  // 第2步：每个 zone 分配一个优选域名，zone 内所有子域名指向同一目标
   const assignments = [];
-  for (const zone of ZONE_MAP) {
-    for (let i = 0; i < zone.names.length; i++) {
-      const poolIndex = i % validPool.length;
+  for (let z = 0; z < ZONE_MAP.length; z++) {
+    const zone = ZONE_MAP[z];
+    const target = validPool[z % validPool.length];
+    for (const name of zone.names) {
       assignments.push({
-        fqdn: `${zone.names[i]}.${zone.zoneName}`,
+        fqdn: `${name}.${zone.zoneName}`,
         zoneName: zone.zoneName,
-        name: zone.names[i],
+        name,
         tokenKey: zone.tokenKey,
-        target: validPool[poolIndex],
-        poolIndex,
+        target,
+        poolIndex: z % validPool.length,
       });
     }
   }
