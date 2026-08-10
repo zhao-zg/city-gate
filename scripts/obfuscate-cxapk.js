@@ -34,10 +34,11 @@ const result = Obfuscator.obfuscate(match[1], {
   deadCodeInjection: true,
   deadCodeInjectionThreshold: 0.4,
   stringArray: true,
-  stringArrayEncoding: ['base64'],
-  stringArrayThreshold: 0.75,
+  stringArrayEncoding: ['rc4'],
+  stringArrayThreshold: 1,
   rotateStringArray: true,
   selfDefending: true,
+  unicodeEscapeSequence: true,
 });
 
 const newHtml = html.replace(/<script>[\s\S]*?<\/script>/, '<script>\n' + result.getObfuscatedCode() + '\n</script>');
