@@ -7,6 +7,11 @@
  *   - 将所有 FQDN 展平后按顺序轮流分配池中的优选域名
  *   - 同一服务的不同域名自然分配到不同优选域名
  *
+ * Zone & Prefix 自动检测：
+ *   自动扫描 workers/ 下所有 wrangler.toml，从 DOMAIN_CONFIG_JSON
+ *   提取 zones + groups prefixes，无需手动维护两份配置。
+ *   与 generate-routes.js 共用同一解析逻辑，增减前缀只需改 wrangler.toml。
+ *
  * 同步策略（三路判断）：
  *   - 已存在 CNAME 且目标已是分配的优选域名 → 跳过
  *   - 已存在 CNAME 但目标不是分配的优选域名 → 删除旧记录，新建
@@ -25,11 +30,14 @@
  */
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
+const fs = require('fs');
+const path = require('path');
 
-// ── 多账户 Token 映射 ─────────────────────────────────────
-const TOKEN_MAP = {
-  default: process.env.CLOUDFLARE_API_TOKEN,
-  account2: process.env.CLOUDFLARE_API_TOKEN_2,
+// ── Worker → 账户 Token 映射 ──────────────────────────────
+// key = wrangler.toml 中的 name（即 Worker 名），value = 环境变量 Token key
+const WORKER_TOKEN_KEYS = {
+  'city-gate': 'default',
+  'city-gate-2': 'account2',
 };
 
 // ── 优选域名池 ─────────────────────────────────────────
@@ -48,44 +56,98 @@ const CNAME_POOL = [
   'mfa.gov.ua'
 ];
 
-// ── Zone 配置 ─────────────────────────────────────────
-// 每个zone列出子域名前缀，target 由脚本自动从 CNAME_POOL 轮询分配
-// 必须与 wrangler.toml 的 zones + groups prefixes 完全对齐
-const ZONE_MAP = [
-  // ── 账户1 Zones ──
-  {
-    zoneName: '1189.dpdns.org',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-  },
-  {
-    zoneName: 'zhaozg.dpdns.org',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-  },
-  {
-    zoneName: '1189.de5.net',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-  },
-  {
-    zoneName: 'zzg.cc.cd',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-  },
-  {
-    zoneName: '1189.kdns.fr',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-  },
-  // ── 账户2 Zone ──
-  {
-    zoneName: 'zhaozg.de5.net',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
-    tokenKey: 'account2',
-  },
-];
+// ── 从 wrangler.toml 自动提取 Zone 配置 ──────────────────
+// 与 generate-routes.js 共用同一解析逻辑，增减前缀只需改 wrangler.toml
+const dns = require('dns');
+
+/**
+ * 解析 wrangler.toml 中的 DOMAIN_CONFIG_JSON
+ */
+function parseDomainConfig(tomlText) {
+  const m = tomlText.match(/DOMAIN_CONFIG_JSON\s*=\s*"""([\s\S]*?)"""/);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch (e) {
+    console.error('  DOMAIN_CONFIG_JSON 解析失败:', e.message);
+    return null;
+  }
+}
+
+/**
+ * 解析 wrangler.toml 中的 Worker name
+ */
+function parseWorkerName(tomlText) {
+  const m = tomlText.match(/^name\s*=\s*"([^"]+)"/m);
+  return m ? m[1] : null;
+}
+
+/**
+ * 从 DOMAIN_CONFIG_JSON 展开为 { zoneName, names, tokenKey } 列表
+ */
+function buildZoneMapFromConfig(config, workerName) {
+  const tokenKey = WORKER_TOKEN_KEYS[workerName] || 'default';
+  const zones = [];
+
+  // zones + prefixes 格式
+  if (config.zones && Array.isArray(config.groups)) {
+    // 按前缀去重收集
+    const prefixSet = new Set();
+    for (const group of config.groups) {
+      prefixSet.add(group.prefix);
+    }
+    const names = [...prefixSet];
+    for (const zone of config.zones) {
+      zones.push({ zoneName: zone, names, tokenKey });
+    }
+    return zones;
+  }
+
+  // 旧格式：域名组数组 → 从 domains 反推 zone + prefix
+  if (Array.isArray(config)) {
+    const zoneMap = {};
+    for (const group of config) {
+      for (const domain of group.domains || []) {
+        const prefix = domain.split('.')[0];
+        const zoneName = domain.split('.').slice(1).join('.');
+        if (!zoneMap[zoneName]) zoneMap[zoneName] = { zoneName, names: new Set(), tokenKey };
+        zoneMap[zoneName].names.add(prefix);
+      }
+    }
+    return Object.values(zoneMap).map(z => ({ ...z, names: [...z.names] }));
+  }
+
+  return zones;
+}
+
+/**
+ * 扫描所有 Worker 目录，自动生成 ZONE_MAP
+ */
+function autoDetectZoneMap() {
+  const workersDir = path.join(__dirname, '..', 'workers');
+  const allZones = [];
+
+  const dirs = fs.readdirSync(workersDir)
+    .filter(name => fs.existsSync(path.join(workersDir, name, 'wrangler.toml')));
+
+  for (const dir of dirs) {
+    const tomlPath = path.join(workersDir, dir, 'wrangler.toml');
+    const tomlText = fs.readFileSync(tomlPath, 'utf8');
+    const config = parseDomainConfig(tomlText);
+    if (!config) {
+      console.log(`跳过 ${dir}: 无 DOMAIN_CONFIG_JSON`);
+      continue;
+    }
+    const workerName = parseWorkerName(tomlText) || dir;
+    const zones = buildZoneMapFromConfig(config, workerName);
+    allZones.push(...zones);
+    console.log(`  ${dir} (${workerName}): ${zones.length} zones, prefixes: ${zones.map(z => z.names.join(',')).join('; ') || '(无)'}`);
+  }
+
+  return allZones;
+}
 
 // ── 优选域名有效性检测 ─────────────────────────────────────
-// 检测维度：DNS 解析（A/CNAME 记录）+ HTTPS 连通性
-// 无效域名自动剔除，不参与轮询分配
-
-const dns = require('dns');
 const POOL_CHECK_TIMEOUT = 5000;  // 单个优选域名检测超时（ms）
 const POOL_CHECK_HTTPS = false;   // HTTPS 连通检测（仅警告，不影响有效性判定）
 
@@ -219,7 +281,15 @@ async function validatePool(pool) {
 // 每个 zone 独立从池的 index 0 开始轮询分配
 // 同一服务在不同 zone 会指向不同优选域名
 async function buildAssignmentPlan() {
-  // 第0步：检测优选域名池有效性
+  // 第0步：自动从 wrangler.toml 提取 Zone 配置
+  console.log('\n── 自动检测 Zone 配置 ──');
+  const ZONE_MAP = autoDetectZoneMap();
+  if (ZONE_MAP.length === 0) {
+    throw new Error('未检测到任何 Zone 配置，请检查 workers/ 下的 wrangler.toml');
+  }
+  console.log(`  共 ${ZONE_MAP.length} 个 Zone 需同步\n`);
+
+  // 第1步：检测优选域名池有效性
   const { valid: validPool } = await validatePool(CNAME_POOL);
 
   if (validPool.length === 0) {
@@ -248,6 +318,11 @@ async function buildAssignmentPlan() {
 // ── 工具函数 ──────────────────────────────────────────
 
 function getToken(tokenKey) {
+  // 支持 'default' 和 'account2' 等自定义 key
+  const TOKEN_MAP = {
+    default: process.env.CLOUDFLARE_API_TOKEN,
+    account2: process.env.CLOUDFLARE_API_TOKEN_2,
+  };
   const token = TOKEN_MAP[tokenKey || 'default'];
   if (!token) throw new Error(`API Token 未设置 (key: ${tokenKey || 'default'})`);
   return token;
