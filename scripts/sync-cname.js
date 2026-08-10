@@ -50,12 +50,30 @@ const CNAME_POOL = [
 
 // ── Zone 配置 ─────────────────────────────────────────
 // 每个zone列出子域名前缀，target 由脚本自动从 CNAME_POOL 轮询分配
+// 必须与 wrangler.toml 的 zones + groups prefixes 完全对齐
 const ZONE_MAP = [
+  // ── 账户1 Zones ──
+  {
+    zoneName: '1189.dpdns.org',
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
+  },
   {
     zoneName: 'zhaozg.dpdns.org',
-    names: ['sg', 'books', 'bible', 'cx', 'sg-resource'],
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
   },
-  // 账户2 Zone
+  {
+    zoneName: '1189.de5.net',
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
+  },
+  {
+    zoneName: 'zzg.cc.cd',
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
+  },
+  {
+    zoneName: '1189.kdns.fr',
+    names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
+  },
+  // ── 账户2 Zone ──
   {
     zoneName: 'zhaozg.de5.net',
     names: ['sg', 'books', 'bible', 'cx', 'sg-resource', 'apk'],
