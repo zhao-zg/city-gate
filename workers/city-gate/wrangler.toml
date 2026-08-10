@@ -44,6 +44,11 @@ DOMAIN_CONFIG_JSON = """
       "prefix": "sg-resource",
       "origin": "https://sg-resource-3ld.pages.dev",
       "cities": ["ALL"]
+    },
+    {
+      "prefix": "apk",
+      "origin": "https://sg-resource-3ld.pages.dev",
+      "cities": ["ALL"]
     }
   ]
 }
