@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '353e0bda-7dcf-4c4e-b7e0-4caa7ef48a54'
-  PropagateID: '353e0bda-7dcf-4c4e-b7e0-4caa7ef48a54'
-  ReservedCode1: 'bcc4b043-e14c-499b-9025-f624db8990d5'
-  ReservedCode2: 'bcc4b043-e14c-499b-9025-f624db8990d5'
+  ProduceID: 'b4ef205b-a414-4f13-bff2-6db82249e474'
+  PropagateID: 'b4ef205b-a414-4f13-bff2-6db82249e474'
+  ReservedCode1: '6ba1b111-172f-4f2d-9804-0b1fa854ca59'
+  ReservedCode2: '6ba1b111-172f-4f2d-9804-0b1fa854ca59'
 ---
 
 # city-gate
@@ -24,9 +24,8 @@ workers/
 ├── city-gate/           # 城市访问网关
 │   ├── worker.js
 │   └── wrangler.toml
-└── cxapk/               # APK 下载代理
-    ├── worker.js
-    └── wrangler.toml
+└── cxapk/               # APK 下载页（Pages 托管）
+    └── index.html
 scripts/
 ├── sync-cname.js        # DNS CNAME 同步脚本
 └── update-ip2region.js  # ip2region xdb 更新脚本
@@ -150,4 +149,3 @@ CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
 |------|--------|------|
 | `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串（域名组数组），唯一配置来源，格式见 wrangler.toml |
 | `PAGES_ORIGIN` | city-gate | 兜底源站地址 |
-| `ALLOWED_CITIES` | cxapk | 允许的城市，逗号分隔（如 `杭州,Hangzhou`） |

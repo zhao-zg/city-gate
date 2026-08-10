@@ -1,8 +1,5 @@
 {
   "name": "city-gate",
   "private": true,
-  "description": "Cloudflare Workers 城市IP访问限制网关",
-  "devDependencies": {
-    "wrangler": "^4"
-  }
+  "description": "Cloudflare Workers 城市IP访问限制网关"
 }

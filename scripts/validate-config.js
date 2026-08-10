@@ -63,7 +63,7 @@ function validateSchedule(schedule, prefix) {
   return errors;
 }
 
-for (const dir of ['workers/city-gate', 'workers/city-gate-2', 'workers/cxapk', 'workers/cxapk-2']) {
+for (const dir of ['workers/city-gate', 'workers/city-gate-2']) {
   const file = path.join(dir, 'wrangler.toml');
   if (!fs.existsSync(file)) { console.log(file, '-> 不存在'); continue; }
   const text = fs.readFileSync(file, 'utf8');

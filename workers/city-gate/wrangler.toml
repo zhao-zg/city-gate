@@ -23,7 +23,7 @@ DOMAIN_CONFIG_JSON = """
     {
       "prefix": "books",
       "origin": "https://books-em3.pages.dev",
-      "cities": ["ALL"],
+      "cities": ["ALL"]
       "schedule": {
         "days": [1, 2, 3, 4, 5, 6, 7],
         "periods": ["01:00-22:00"]
@@ -32,8 +32,8 @@ DOMAIN_CONFIG_JSON = """
     {
       "prefix": "bible",
       "origin": "https://bible-bka.pages.dev",
-      "cities": ["ALL"],
-      "provinces": ["浙江", "Zhejiang"]
+      "cities": ["ALL"]
+#      "provinces": ["浙江", "Zhejiang"]
     },
     {
       "prefix": "cx",

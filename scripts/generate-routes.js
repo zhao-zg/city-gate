@@ -93,7 +93,7 @@ function processWorkerDir(dir) {
   const config = parseDomainConfig(tomlText);
 
   if (!config) {
-    // 无 DOMAIN_CONFIG_JSON，直接复制原文件（cxapk 等需要保留手写 routes）
+    // 无 DOMAIN_CONFIG_JSON，直接复制原文件
     fs.writeFileSync(dstPath, tomlText, 'utf8');
     console.log(`  无 DOMAIN_CONFIG_JSON，直接复制`);
     return;
