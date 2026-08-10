@@ -25,6 +25,20 @@ export default {
       await initIpLookup(env.IP2REGION);
     }
 
+    // 0.5 CORS 预检（OPTIONS）— 全局拦截，直接返回 CORS 头
+    //    跨域 fetch 先发 OPTIONS 预检，必须返回正确的 CORS 头才能通过
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+          'Access-Control-Allow-Headers': request.headers.get('Access-Control-Request-Headers') || '*',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
+    }
+
     // 1. 加载配置：全部来自环境变量 DOMAIN_CONFIG_JSON
     //    支持两种结构：
     //    - 域名组数组：[{ origin, cities, provinces, domains: [...] }, ...]（推荐，共享配置免重复）

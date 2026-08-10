@@ -118,6 +118,18 @@ var suffixes = ['1189.dpdns.org', 'zhaozg.dpdns.org', '1189.de5.net', 'zhaozg.de
 var CACHE_KEY = 'cx_fastest_suffix';
 var CACHE_TTL = 3600000;
 
+// 检测当前页面所在域名是否属于已知 suffix（通过 Worker 代理访问）
+// 如果是，优先用当前 suffix，避免跨域
+function detectCurrentSuffix() {
+  var host = location.hostname;
+  for (var i = 0; i < suffixes.length; i++) {
+    if (host === 'apk.' + suffixes[i] || host === 'cxapk-ah0.pages.dev' || host.endsWith('.' + suffixes[i])) {
+      return suffixes[i];
+    }
+  }
+  return null;
+}
+
 function getCachedSuffix() {
   try {
     var cached = localStorage.getItem(CACHE_KEY);
@@ -136,6 +148,13 @@ function setCachedSuffix(suffix) {
 }
 
 function raceSuffix() {
+  // 如果当前已在已知 suffix 域名下，直接用当前 suffix，无需竞速
+  var current = detectCurrentSuffix();
+  if (current) {
+    setCachedSuffix(current);
+    return Promise.resolve(current);
+  }
+
   var cached = getCachedSuffix();
   if (cached) return Promise.resolve(cached);
 
