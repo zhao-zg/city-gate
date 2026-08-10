@@ -266,8 +266,10 @@ jobs:
         with:
           node-version: '20'
       - name: 安装依赖
-        run: npm install javascript-obfuscator
+        run: npm install --prefix $RUNNER_TEMP/obf javascript-obfuscator
       - name: 混淆 JS
+        env:
+          NODE_PATH: ${{ runner.temp }}/obf/node_modules
         run: node scripts/obfuscate-cxapk.js
       - name: 安装 wrangler
         run: npm install -g wrangler
@@ -275,7 +277,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler pages deploy pages/cxapk --project-name=cxapk
+        run: |
+          wrangler pages project create cxapk --production-branch=master || true
+          wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
 
   # ================================================================
   #  Job 5：部署汇总
@@ -290,8 +294,8 @@ jobs:
           echo "━━━ 部署结果汇总 ━━━"
           echo "账户1: ${{ needs.deploy-account-1.result }}"
           echo "账户2: ${{ needs.deploy-account-2.result }}"
-          if [ "${{ needs.deploy-account-1.result }}" = "failure" ] || [ "${{ needs.deploy-account-2.result }}" = "failure" ]; then
-            echo "⚠ 有账户部署失败"
+          if [ "${{ needs.deploy-account-1.result }}" = "failure" ] || [ "${{ needs.deploy-account-2.result }}" = "failure" ] || [ "${{ needs.deploy-pages.result }}" = "failure" ]; then
+            echo "⚠ 有部署失败"
             exit 1
           fi
           echo "✓ 全部部署完成"
