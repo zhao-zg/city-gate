@@ -59,6 +59,11 @@ jobs:
         id: check
         run: |
           ACCOUNTS="${{ github.event.inputs.accounts || '1,2' }}"
+          if echo "$ACCOUNTS" | grep -qw "2"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: 检出代码
         if: steps.check.outputs.skip == 'false'
         uses: actions/checkout@v4
@@ -272,6 +277,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler pages project create cxapk --production-branch=master || true
+          wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
+      - name: 部署 cxapk Pages（账户2）
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
         run: |
           wrangler pages project create cxapk --production-branch=master || true
           wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
