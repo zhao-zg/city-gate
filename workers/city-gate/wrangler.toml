@@ -6,6 +6,7 @@ compatibility_date = "2024-12-01"
 # 存放 ip2region xdb 数据文件
 # 部署时 update-ip2region.js 脚本会自动查找/创建 KV namespace
 # 并将 id 写回此文件；CI 部署步骤也会自动注入 id
+#      "provinces": ["浙江", "Zhejiang"]
 [[kv_namespaces]]
 binding = "IP2REGION"
 id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
@@ -33,7 +34,6 @@ DOMAIN_CONFIG_JSON = """
       "prefix": "bible",
       "origin": "https://bible-bka.pages.dev",
       "cities": ["ALL"]
-#      "provinces": ["浙江", "Zhejiang"]
     },
     {
       "prefix": "cx",
