@@ -8,7 +8,7 @@ const DOMAIN_SUFFIXES = [
   'zzg.cc.cd',
   '1189.kdns.fr',
 ];
-const APP_NAMES = { sg: '诗歌', books: '书籍', bible: '圣经', cx: '晨兴' };
+const APP_NAMES = { sg: '诗歌', books: '书籍', bible: '圣经', cx: '晨读' };
 
 const config = JSON.stringify({
   prefixes: APP_PREFIXES,
