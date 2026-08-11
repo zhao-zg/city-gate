@@ -185,7 +185,7 @@ function raceSuffix() {
   var results = {};
   var promises = suffixes.map(function(suffix) {
     var start = Date.now();
-    return fetch('https://' + suffix + '/?ping', { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
+    return fetch('https://apk.' + suffix + '/?_t=' + start, { method: 'HEAD', cache: 'no-store' })
       .then(function() {
         results[suffix] = Date.now() - start;
       })
@@ -336,7 +336,7 @@ function renderNodeSwitcher(activeSuffix, raceResults) {
     if (!unreachable) {
       el.innerHTML = label + ' <span class="node-latency">' + t + 'ms</span>';
     } else {
-      el.textContent = label;
+      el.innerHTML = label + ' <span class="node-latency">不可达</span>';
     }
     if (!unreachable) {
       el.addEventListener('click', function() {
