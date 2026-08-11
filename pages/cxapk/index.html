@@ -152,11 +152,11 @@ function raceSuffix() {
   var current = detectCurrentSuffix();
   if (current) {
     setCachedSuffix(current);
-    return Promise.resolve(current);
+    return Promise.resolve({ suffix: current, latency: null });
   }
 
   var cached = getCachedSuffix();
-  if (cached) return Promise.resolve(cached);
+  if (cached) return Promise.resolve({ suffix: cached, latency: null });
 
   var results = {};
   var promises = suffixes.map(function(suffix) {
@@ -170,9 +170,9 @@ function raceSuffix() {
       });
   });
 
-  // 10 秒超时兜底，防止所有域名不可达时等太久
+  // 5 秒超时兜底，防止所有域名不可达时等太久
   var timeout = new Promise(function(resolve) {
-    setTimeout(function() { resolve(null); }, 10000);
+    setTimeout(function() { resolve(null); }, 5000);
   });
 
   return Promise.race([Promise.all(promises), timeout]).then(function() {
@@ -183,7 +183,7 @@ function raceSuffix() {
       if (t !== undefined && t < bestTime) { bestTime = t; best = s; }
     });
     setCachedSuffix(best);
-    return best;
+    return { suffix: best, latency: bestTime };
   });
 }
 
@@ -256,7 +256,9 @@ function bindButtons(suffix) {
 
 function init() {
   renderAppList();
-  raceSuffix().then(function(suffix) {
+  raceSuffix().then(function(result) {
+    var suffix = result.suffix;
+    var latency = result.latency;
     // 竞速完成后启用按钮并绑定事件
     document.querySelectorAll('.app-action--android').forEach(function(btn) {
       btn.disabled = false;
@@ -267,9 +269,12 @@ function init() {
       btn.textContent = '打开 PWA';
     });
     bindButtons(suffix);
-    // Show fastest suffix
+    // Show fastest suffix and latency
     var hint = document.querySelector('.section-hint');
-    if (hint) hint.textContent += '  |  当前节点: ' + suffix;
+    if (hint) {
+      var latencyText = (latency !== null && latency !== undefined && latency < 99999) ? ' (' + latency + 'ms)' : '';
+      hint.textContent += '  |  当前节点: ' + suffix + latencyText;
+    }
   });
 }
 
