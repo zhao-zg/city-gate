@@ -89,6 +89,31 @@
   .app-action--ios:active{transform:scale(.97)}
   .app-action[disabled]{opacity:.5;cursor:not-allowed;transform:none!important;box-shadow:none!important}
 
+  /* 节点切换器 */
+  .node-switcher{margin-top:6px}
+  .node-switcher-toggle{
+    font-size:12px;color:var(--antd-text-tertiary);cursor:pointer;
+    background:none;border:none;padding:0;line-height:1.5;
+    transition:color .2s;
+  }
+  .node-switcher-toggle:hover{color:var(--antd-text-secondary)}
+  .node-switcher-list{display:none;margin-top:8px;gap:6px;flex-wrap:wrap}
+  .node-switcher-list.open{display:flex}
+  .node-item{
+    display:inline-flex;align-items:center;gap:4px;
+    padding:4px 10px;font-size:12px;font-weight:500;
+    border-radius:var(--antd-radius);border:1px solid var(--antd-border);
+    background:var(--antd-bg-card);color:var(--antd-text-secondary);
+    cursor:pointer;transition:all .2s;white-space:nowrap;
+  }
+  .node-item:hover{border-color:var(--antd-primary-border);color:var(--antd-primary)}
+  .node-item.active{
+    border-color:var(--antd-primary);background:var(--antd-primary-bg);
+    color:var(--antd-primary);font-weight:600;
+  }
+  .node-item.unreachable{opacity:.4;cursor:not-allowed}
+  .node-item .node-latency{font-size:11px;opacity:.7;font-weight:400}
+
 </style>
 </head>
 <body>
@@ -108,6 +133,12 @@
   </div>
   <p class="section-hint">Safari 打开 → 分享 → 添加到主屏幕</p>
   <div id="ios-list"></div>
+</div>
+<div class="section">
+  <div class="node-switcher">
+    <button class="node-switcher-toggle" id="node-toggle">切换节点 ▾</button>
+    <div class="node-switcher-list" id="node-list"></div>
+  </div>
 </div>
 
 <script>
@@ -152,11 +183,11 @@ function raceSuffix() {
   var current = detectCurrentSuffix();
   if (current) {
     setCachedSuffix(current);
-    return Promise.resolve({ suffix: current, latency: null });
+    return Promise.resolve({ suffix: current, latency: null, results: {} });
   }
 
   var cached = getCachedSuffix();
-  if (cached) return Promise.resolve({ suffix: cached, latency: null });
+  if (cached) return Promise.resolve({ suffix: cached, latency: null, results: {} });
 
   var results = {};
   var promises = suffixes.map(function(suffix) {
@@ -183,7 +214,7 @@ function raceSuffix() {
       if (t !== undefined && t < bestTime) { bestTime = t; best = s; }
     });
     setCachedSuffix(best);
-    return { suffix: best, latency: bestTime };
+    return { suffix: best, latency: bestTime, results: results };
   });
 }
 
@@ -259,6 +290,7 @@ function init() {
   raceSuffix().then(function(result) {
     var suffix = result.suffix;
     var latency = result.latency;
+    var raceResults = result.results || {};
     // 竞速完成后启用按钮并绑定事件
     document.querySelectorAll('.app-action--android').forEach(function(btn) {
       btn.disabled = false;
@@ -274,6 +306,77 @@ function init() {
     if (hint) {
       var latencyText = (latency !== null && latency !== undefined && latency < 99999) ? ' (' + latency + 'ms)' : '';
       hint.textContent += '  |  当前节点: ' + suffix + latencyText;
+    }
+    // Render node switcher
+    renderNodeSwitcher(suffix, raceResults);
+  });
+}
+
+function renderNodeSwitcher(activeSuffix, raceResults) {
+  var toggle = document.getElementById('node-toggle');
+  var list = document.getElementById('node-list');
+  if (!toggle || !list) return;
+
+  // 没有测速结果时（短路/缓存路径），隐藏切换器
+  var hasResults = Object.keys(raceResults).length > 0;
+  if (!hasResults) {
+    toggle.style.display = 'none';
+    return;
+  }
+
+  // 排序：可达节点按延迟升序，不可达排末尾
+  var sorted = suffixes.slice().sort(function(a, b) {
+    var ta = raceResults[a] != null ? raceResults[a] : 99999;
+    var tb = raceResults[b] != null ? raceResults[b] : 99999;
+    return ta - tb;
+  });
+
+  sorted.forEach(function(suffix) {
+    var t = raceResults[suffix];
+    var unreachable = (t == null || t >= 99999);
+    var el = document.createElement('span');
+    el.className = 'node-item' + (suffix === activeSuffix ? ' active' : '') + (unreachable ? ' unreachable' : '');
+    var label = suffix;
+    if (!unreachable) {
+      el.innerHTML = label + ' <span class="node-latency">' + t + 'ms</span>';
+    } else {
+      el.textContent = label;
+    }
+    if (!unreachable) {
+      el.addEventListener('click', function() {
+        switchNode(suffix);
+      });
+    }
+    list.appendChild(el);
+  });
+
+  toggle.addEventListener('click', function() {
+    list.classList.toggle('open');
+    toggle.textContent = list.classList.contains('open') ? '切换节点 ▴' : '切换节点 ▾';
+  });
+}
+
+function switchNode(suffix) {
+  setCachedSuffix(suffix);
+  // 更新按钮绑定
+  bindButtons(suffix);
+  // 更新 active 样式
+  document.querySelectorAll('.node-item').forEach(function(el) {
+    el.classList.remove('active');
+  });
+  // 找到对应节点标记 active（通过文本匹配）
+  document.querySelectorAll('.node-item').forEach(function(el) {
+    if (el.textContent.indexOf(suffix) === 0) {
+      el.classList.add('active');
+    }
+  });
+  // 更新提示文字
+  var hints = document.querySelectorAll('.section-hint');
+  hints.forEach(function(hint) {
+    var text = hint.textContent;
+    var idx = text.indexOf('当前节点:');
+    if (idx !== -1) {
+      hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix;
     }
   });
 }
