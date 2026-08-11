@@ -51,13 +51,13 @@ const CNAME_POOL = [
   'cf.877774.xyz',
   'cf.cloudflare.182682.xyz',
   '1.cf.3666888.xyz',
-  'www.shopify.com',
   'cf.yfjc.sbs',
-  'icook.hk',
   'cf-cname.xingpingcn.top',
   'zzg.cf.959923.xyz',
   'ips.993888.xyz',
-  'bestcf.030101.xyz'
+  'bestcf.030101.xyz',
+  'www.shopify.com',
+  'icook.hk'
 ];
 
 // ── 从 wrangler.toml 自动提取 Zone 配置 ──────────────────
