@@ -46,18 +46,34 @@ const WORKER_TOKEN_KEYS = {
 // 注意：1034（Edge IP Restricted）按"受限 IP 空间 × 未授权 Host"触发，
 //       无法用 IP 段猜测。validatePool 会用自家域名做真实请求验证，
 //       响应含 "error code: 1034" 的域名自动跳过，只使用安全域名。
+//
+// 已移除（多解析器全 IP 检测确认混合池，部分 IP 触发 1034）：
+//   - cf.cloudflare.182682.xyz  5/10 IP 触发 1034（162.159.9.193 等）
+//   - 1.cf.3666888.xyz          2/5 IP 触发 1034（172.64.52.173、108.162.198.88）
+// 混合池域名用户随机命中受限 IP 即 1034，即使"还有 N 个可用"也禁用。
+//
+// 补充来源：vps789.com/openApi/cfIpTop20（实时优选域名 Top20），
+//   取其中通过全 IP 1034 检测的域名（2026-08-11 检测，测试 Host: sg.zzg.cc.cd）。
+// 去重原则：**同二级域名（注册域）只保留一个**，多个子域名指向同一注册域
+//   无容灾意义（挂都挂），反而稀释池子。validatePool 也会自动去重兜底。
 const CNAME_POOL = [
+  // ── 原池保留（历史实测干净）──
   'cf.090227.xyz',
   'cf.877774.xyz',
-  'cf.cloudflare.182682.xyz',
-  '1.cf.3666888.xyz',
   'cf.yfjc.sbs',
   'cf-cname.xingpingcn.top',
   'zzg.cf.959923.xyz',
   'ips.993888.xyz',
   'bestcf.030101.xyz',
   'www.shopify.com',
-  'icook.hk'
+  'icook.hk',
+  // ── cfIpTop20 补充（2026-08-11 全 IP 检测通过，同二级域名去重）──
+  'g.lma.de5.net',
+  'cdn.2x.nz',
+  'blog.646474.xyz',
+  'yg8.ygkkk.dpdns.org',
+  'cdn.091224.xyz',
+  'b3.cfyx.20237737.xyz'
 ];
 
 // ── 从 wrangler.toml 自动提取 Zone 配置 ──────────────────
@@ -176,20 +192,60 @@ function is1034Ip(ip) {
   return CF_PUBLIC_RESERVED_IPS.includes(ip);
 }
 
+/** Promise 包装 dns.resolve4，带超时 */
+function dnsResolve4(domain, timeout) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('DNS timeout')), timeout);
+    dns.resolve4(domain, (err, addrs) => {
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(addrs);
+    });
+  });
+}
+
 /**
- * 解析域名并返回所有 A 记录 IP（多次解析收集去重）
- * 轮询域名（同一域名不同时刻解析到不同 IP）多次查询能覆盖更多 IP，
- * 尽可能测全域名暴露的所有 A 记录
+ * 从指定 DNS 服务器解析 A 记录（独立 c-ares 解析器，Windows 亦可用）
+ */
+function dnsResolve4FromServer(domain, server, timeout) {
+  return new Promise((resolve) => {
+    const resolver = new dns.Resolver({ timeout, tries: 1 });
+    try {
+      resolver.setServers([server]);
+    } catch (_) {
+      return resolve([]);
+    }
+    resolver.resolve4(domain, (err, addrs) => {
+      try { resolver.cancel(); } catch (_) { /* 忽略 */ }
+      resolve(err ? [] : (addrs || []));
+    });
+  });
+}
+
+// 交叉收集用的公共 DNS 服务器（不同递归解析器会返回不同的轮询 IP）
+const POOL_DNS_SERVERS = ['1.1.1.1', '8.8.8.8', '223.5.5.5'];
+
+/**
+ * 解析域名并返回所有 A 记录 IP（多解析器 × 多轮收集去重）
+ * 轮询域名在不同解析器/不同时刻会返回**不同**的 IP 子集：
+ *   实测 1.cf.3666888.xyz 本机只看到 104.17.188.61，
+ *   而 8.8.8.8 还返回 172.64.52.173、108.162.198.88（均触发 1034）。
+ * 单个解析器收集必然漏检，必须跨解析器全量收集才能测全 1034 风险面。
  */
 async function resolveIps(domain) {
   const ips = new Set();
-  // ── 主路径：Node.js dns.resolve4 多次解析收集 ──
-  for (let round = 0; round < POOL_RESOLVE_ROUNDS; round++) {
-    try {
-      const addrs = await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
-      for (const a of addrs) ips.add(a);
-    } catch (_) {
-      // 该轮失败，继续下一轮
+  // ── 主路径：系统解析器 + 多个公共 DNS 服务器 × 多轮解析收集 ──
+  const servers = ['', ...POOL_DNS_SERVERS]; // '' = 系统默认解析器
+  for (const server of servers) {
+    for (let round = 0; round < POOL_RESOLVE_ROUNDS; round++) {
+      try {
+        const addrs = server
+          ? await dnsResolve4FromServer(domain, server, POOL_CHECK_TIMEOUT)
+          : await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
+        for (const a of addrs) ips.add(a);
+      } catch (_) {
+        // 该轮失败，继续下一轮
+      }
     }
   }
   if (ips.size > 0) return [...ips];
@@ -212,18 +268,6 @@ async function resolveIps(domain) {
     // 忽略
   }
   return [...ips];
-}
-
-/** Promise 包装 dns.resolve4，带超时 */
-function dnsResolve4(domain, timeout) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('DNS timeout')), timeout);
-    dns.resolve4(domain, (err, addrs) => {
-      clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(addrs);
-    });
-  });
 }
 
 /**
@@ -316,11 +360,13 @@ function buildTestHost(zoneMap) {
 }
 
 /**
- * 检测单个优选域名是否可用：
+ * 检测单个优选域名是否可用（严格模式）:
  * 1. DNS 解析（无 A 记录 → 不可用）
  * 2. 快速短路：解析到 CF 公共保留 IP（1.1.1.1 等）→ 必 1034，不可用
- * 3. 真实请求验证：用自家域名做 Host 逐 IP 访问
- *    多个 IP 时只要有一个可用即视为可用（用户可能随机命中任一 IP）
+ * 3. 真实请求验证：对**收集到的全部 IP** 用自家域名做 Host 逐一访问
+ *    判定规则：**任一 IP 触发 1034 即判不可用**——
+ *    轮询域名每个 IP 都可能被用户命中，混合池（部分 IP 1034）依然危险，
+ *    绝不能因"还有 N 个可用"而分配出去。
  */
 async function checkPoolDomain(domain, testHost) {
   const ips = await resolveIps(domain);
@@ -336,29 +382,58 @@ async function checkPoolDomain(domain, testHost) {
   }
 
   // 真实请求验证：对每个 IP 用自家域名做 Host 访问
-  const checks = await Promise.all(ips.map(ip => testIp1034(ip, testHost)));
+  const checks = await Promise.all(ips.map(async (ip) => {
+    const r = await testIp1034(ip, testHost);
+    return { ip, ...r };
+  }));
   const good = checks.filter(r => r.ok);
+  const bad = checks.filter(r => !r.ok);
 
+  if (bad.length === 0) {
+    return { ok: true, reason: `IP 可用: ${ips.join(', ')}` };
+  }
   if (good.length === 0) {
-    const reasons = [...new Set(checks.map(r => r.reason))];
-    return { ok: false, reason: reasons.join('; ') };
+    const badIps = bad.map(r => `${r.ip}(${r.reason})`).join('; ');
+    return { ok: false, reason: `全部 ${checks.length} 个 IP 触发 1034: ${badIps}` };
   }
-  if (good.length < checks.length) {
-    return { ok: true, reason: `⚠ ${checks.length - good.length}/${checks.length} IP 触发 1034，仍有 ${good.length} 个可用` };
-  }
-  return { ok: true, reason: `IP 可用: ${ips.join(', ')}` };
+  // 混合池：部分 IP 触发 1034 → 用户可能随机命中受限 IP，视为不可用
+  const badIps = bad.map(r => `${r.ip}(${r.reason})`).join('; ');
+  return { ok: false, reason: `⚠ 混合池 ${bad.length}/${checks.length} IP 触发 1034（${badIps}），用户可能命中受限 IP，禁用` };
+}
+
+/**
+ * 提取注册域（二级域名）：取域名最后两段
+ * 如 yg8.ygkkk.dpdns.org → ygkkk.dpdns.org；cf-cname.xingpingcn.top → xingpingcn.top
+ */
+function registrableDomain(domain) {
+  const parts = domain.split('.');
+  return parts.slice(-2).join('.');
 }
 
 /**
  * 并发检测优选域名池，返回安全域名列表和检测报告
  * 用自家域名做真实请求验证，有 1034 风险的域名自动跳过，只使用安全域名
+ * 去重：同二级域名（注册域）只保留池中第一个，避免重复检测与无意义冗余
  */
 async function validatePool(pool, testHost) {
   console.log('\n── 优选域名池有效性检测 ──');
   console.log(`  测试 Host: ${testHost}（真实请求验证 1034）\n`);
 
+  // 按注册域去重：同二级域名的子域名视为同一个，只保留第一个
+  const seen = new Set();
+  const deduped = [];
+  for (const d of pool) {
+    const reg = registrableDomain(d);
+    if (seen.has(reg)) {
+      console.log(`  ↦ 跳过 ${d}（与 ${reg} 同二级域名，视为重复）`);
+      continue;
+    }
+    seen.add(reg);
+    deduped.push(d);
+  }
+
   const results = await Promise.all(
-    pool.map(async (domain) => {
+    deduped.map(async (domain) => {
       const result = await checkPoolDomain(domain, testHost);
       const status = result.ok ? '✓' : '✗';
       const reason = result.reason || '';
@@ -376,9 +451,83 @@ async function validatePool(pool, testHost) {
       console.log(`     - ${r.domain}: ${r.reason}`);
     }
   }
-  console.log(`  池大小: ${pool.length}，安全可用: ${valid.length}`);
+  console.log(`  池大小: ${pool.length}（去重后 ${deduped.length}），安全可用: ${valid.length}`);
 
   return { valid, invalid };
+}
+
+// ── 池自动补充（vps789.com cfIpTop20） ────────────────────
+// 用途：GitHub Actions 定时同步时，若池内有效域名不足（部分域名 1034 被跳过、
+//       新增 zone 等场景），自动从 vps789 实时优选 Top20 拉取候选并检测补充，
+//       保证同步永远有足量安全域名可用，无需手动维护池。
+const POOL_API = 'https://vps789.com/openApi/cfIpTop20';
+const POOL_MIN_VALID = 8;   // 有效域名低于此数量时触发补充（当前 6 zone，留余量）
+
+/**
+ * 拉取 vps789 实时优选域名 Top20
+ * 返回域名数组（失败时返回空数组，不抛异常）
+ */
+async function fetchCfIpTop20() {
+  try {
+    const res = await fetch(POOL_API, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    const json = await res.json();
+    const list = (json?.data?.good || []).map(g => g.ip).filter(d => typeof d === 'string' && d.includes('.'));
+    return [...new Set(list)];
+  } catch (e) {
+    console.error(`  ✗ 拉取 cfIpTop20 失败: ${e.message}`);
+    return [];
+  }
+}
+
+/**
+ * 池自动补充：当有效域名不足时，从 cfIpTop20 拉取候选检测补充
+ * 规则：
+ *   - 候选与池内有效域名同二级域名 → 跳过（防伪容灾）
+ *   - 候选之间同二级域名 → 只取第一个
+ *   - 逐个用真实请求检测 1034，通过才入池
+ * 补充不足或拉取失败时静默返回原池（不阻塞同步）
+ */
+async function autoRefillPool(validPool, testHost, zoneCount) {
+  const need = Math.max(POOL_MIN_VALID, zoneCount + 1);
+  if (validPool.length >= need) return validPool;
+
+  console.log(`\n── 池自动补充（有效 ${validPool.length}/${need}，从 cfIpTop20 拉取候选）──`);
+  const candidates = await fetchCfIpTop20();
+  if (candidates.length === 0) {
+    console.log('  候选拉取失败/为空，跳过补充（使用现有池继续）');
+    return validPool;
+  }
+  console.log(`  候选 ${candidates.length} 个: ${candidates.join(', ')}`);
+
+  const usedRegs = new Set(validPool.map(d => registrableDomain(d)));
+  let added = 0;
+
+  for (const domain of candidates) {
+    if (validPool.length >= need) break;
+    const reg = registrableDomain(domain);
+    if (usedRegs.has(reg)) continue;
+
+    const result = await checkPoolDomain(domain, testHost);
+    if (result.ok) {
+      // 只有检测通过才占用注册域名额（失败的候选不占位，
+      // 否则 auto.dolby.dpdns.org 失败会把 yg8.ygkkk.dpdns.org 等优质候选挤掉）
+      usedRegs.add(reg);
+      validPool.push(domain);
+      added++;
+      console.log(`  ✓ 补充 ${domain.padEnd(30)} ${result.reason.slice(0, 60)}`);
+    } else {
+      console.log(`  ✗ 候选 ${domain.padEnd(30)} 未通过: ${result.reason.slice(0, 70)}`);
+    }
+  }
+
+  console.log(`  补充完成: +${added}，有效池 ${validPool.length}`);
+  return validPool;
 }
 
 // ── 分配计划生成 ─────────────────────────────────────────
@@ -401,11 +550,16 @@ async function buildAssignmentPlan() {
     throw new Error('所有优选域名均无效，无法继续同步！');
   }
 
+  // 第1.5步：池自动补充（有效域名不足时从 cfIpTop20 拉取候选检测补充）
+  // GitHub Actions 定时运行时，若池内域名因 1034 被大量跳过或 zone 增多导致不足，
+  // 自动拉取实时优选 Top20 检测后补足，保证每个 zone 都有独立优选域名。
+  const finalPool = await autoRefillPool(validPool, testHost, ZONE_MAP.length);
+
   // 第2步：每个 zone 分配一个优选域名，zone 内所有子域名指向同一目标
   const assignments = [];
   for (let z = 0; z < ZONE_MAP.length; z++) {
     const zone = ZONE_MAP[z];
-    const target = validPool[z % validPool.length];
+    const target = finalPool[z % finalPool.length];
     for (const name of zone.names) {
       assignments.push({
         fqdn: `${name}.${zone.zoneName}`,
@@ -612,4 +766,24 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+// ── 导出（供其他脚本复用，如 check-cname.js） ──
+module.exports = {
+  autoDetectZoneMap,
+  buildZoneMapFromConfig,
+  resolveIps,
+  is1034Ip,
+  testIp1034,
+  testIp1034Once,
+  checkPoolDomain,
+  registrableDomain,
+  fetchCfIpTop20,
+  autoRefillPool,
+  buildAssignmentPlan,
+  getZoneId,
+  getDnsRecords,
+  CNAME_POOL,
+};
