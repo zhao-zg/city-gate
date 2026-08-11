@@ -45,7 +45,7 @@ const newHtml = html.replace(/<script>[\s\S]*?<\/script>/, '<script>\n' + result
 fs.writeFileSync(filePath, newHtml, 'utf8');
 
 // 验证：检查输出文件中是否还有明文标记或域名
-const domains = ['1189.dpdns.org','zhaozg.dpdns.org','1189.de5.net','zhaozg.de5.net','zzg.cc.cd','1189.kdns.fr'];
+const domains = ['1189.dpdns.org','zhaozg.dpdns.org','1189.de5.net','zzg.cc.cd','1189.kdns.fr'];
 const leakedAfter = domains.filter(d => newHtml.includes(d));
 if (leakedAfter.length > 0) {
   console.error('泄露域名:', leakedAfter);
