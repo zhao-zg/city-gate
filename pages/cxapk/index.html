@@ -209,7 +209,7 @@ function raceSuffix() {
     });
     // 优先用初始节点（当前域名/缓存），否则用竞速最快的
     var suffix = initialSuffix || best;
-    var latency = results[suffix] != null ? results[suffix] : null;
+    var latency = (results[suffix] != null && results[suffix] < 99999) ? results[suffix] : null;
     setCachedSuffix(suffix);
     return { suffix: suffix, latency: latency, results: results };
   });
@@ -331,6 +331,7 @@ function renderNodeSwitcher(activeSuffix, raceResults) {
     var unreachable = (t == null || t >= 99999);
     var el = document.createElement('span');
     el.className = 'node-item' + (suffix === activeSuffix ? ' active' : '') + (unreachable ? ' unreachable' : '');
+    el.setAttribute('data-suffix', suffix);
     var label = suffix;
     if (!unreachable) {
       el.innerHTML = label + ' <span class="node-latency">' + t + 'ms</span>';
@@ -355,33 +356,20 @@ function switchNode(suffix) {
   setCachedSuffix(suffix);
   // 更新按钮绑定
   bindButtons(suffix);
-  // 更新 active 样式
+  // 更新 active 样式（用 data 属性精确匹配，避免前缀歧义）
   document.querySelectorAll('.node-item').forEach(function(el) {
-    el.classList.remove('active');
-    if (el.textContent.indexOf(suffix) === 0) {
-      el.classList.add('active');
-    }
+    el.classList.toggle('active', el.getAttribute('data-suffix') === suffix);
   });
-  // 更新提示文字
-  var hints = document.querySelectorAll('.section-hint');
-  hints.forEach(function(hint) {
+  // 更新提示文字（只更新含"当前节点:"的 hint，避免误改 iOS 提示）
+  var latencyMs = (window._lastRaceResults && window._lastRaceResults[suffix] != null && window._lastRaceResults[suffix] < 99999)
+    ? ' (' + window._lastRaceResults[suffix] + 'ms)' : '';
+  document.querySelectorAll('.section-hint').forEach(function(hint) {
     var text = hint.textContent;
     var idx = text.indexOf('当前节点:');
     if (idx !== -1) {
-      hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix;
+      hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix + latencyMs;
     }
   });
-  // 更新全局延迟（从上次竞速结果中取）
-  if (window._lastRaceResults && window._lastRaceResults[suffix] != null && window._lastRaceResults[suffix] < 99999) {
-    var hints2 = document.querySelectorAll('.section-hint');
-    hints2.forEach(function(hint) {
-      var text = hint.textContent;
-      var idx = text.indexOf('当前节点:');
-      if (idx !== -1) {
-        hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix + ' (' + window._lastRaceResults[suffix] + 'ms)';
-      }
-    });
-  }
 }
 
 init();
