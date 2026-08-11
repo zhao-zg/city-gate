@@ -179,15 +179,8 @@ function setCachedSuffix(suffix) {
 }
 
 function raceSuffix() {
-  // 如果当前已在已知 suffix 域名下，直接用当前 suffix，无需竞速
-  var current = detectCurrentSuffix();
-  if (current) {
-    setCachedSuffix(current);
-    return Promise.resolve({ suffix: current, latency: null, results: {} });
-  }
-
-  var cached = getCachedSuffix();
-  if (cached) return Promise.resolve({ suffix: cached, latency: null, results: {} });
+  // 确定初始选中节点：当前域名 > 缓存
+  var initialSuffix = detectCurrentSuffix() || getCachedSuffix() || null;
 
   var results = {};
   var promises = suffixes.map(function(suffix) {
@@ -207,14 +200,18 @@ function raceSuffix() {
   });
 
   return Promise.race([Promise.all(promises), timeout]).then(function() {
+    // 选最快节点
     var best = suffixes[0];
     var bestTime = 99999;
     suffixes.forEach(function(s) {
       var t = results[s];
       if (t !== undefined && t < bestTime) { bestTime = t; best = s; }
     });
-    setCachedSuffix(best);
-    return { suffix: best, latency: bestTime, results: results };
+    // 优先用初始节点（当前域名/缓存），否则用竞速最快的
+    var suffix = initialSuffix || best;
+    var latency = results[suffix] != null ? results[suffix] : null;
+    setCachedSuffix(suffix);
+    return { suffix: suffix, latency: latency, results: results };
   });
 }
 
@@ -274,13 +271,17 @@ function openPwa(prefix, suffix) {
 
 function bindButtons(suffix) {
   document.querySelectorAll('.app-action--android').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      downloadApk(btn.getAttribute('data-prefix'), suffix);
+    var newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', function() {
+      downloadApk(newBtn.getAttribute('data-prefix'), suffix);
     });
   });
   document.querySelectorAll('.app-action--ios').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      openPwa(btn.getAttribute('data-prefix'), suffix);
+    var newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', function() {
+      openPwa(newBtn.getAttribute('data-prefix'), suffix);
     });
   });
 }
@@ -291,6 +292,7 @@ function init() {
     var suffix = result.suffix;
     var latency = result.latency;
     var raceResults = result.results || {};
+    window._lastRaceResults = raceResults;
     // 竞速完成后启用按钮并绑定事件
     document.querySelectorAll('.app-action--android').forEach(function(btn) {
       btn.disabled = false;
@@ -316,13 +318,6 @@ function renderNodeSwitcher(activeSuffix, raceResults) {
   var toggle = document.getElementById('node-toggle');
   var list = document.getElementById('node-list');
   if (!toggle || !list) return;
-
-  // 没有测速结果时（短路/缓存路径），隐藏切换器
-  var hasResults = Object.keys(raceResults).length > 0;
-  if (!hasResults) {
-    toggle.style.display = 'none';
-    return;
-  }
 
   // 排序：可达节点按延迟升序，不可达排末尾
   var sorted = suffixes.slice().sort(function(a, b) {
@@ -363,9 +358,6 @@ function switchNode(suffix) {
   // 更新 active 样式
   document.querySelectorAll('.node-item').forEach(function(el) {
     el.classList.remove('active');
-  });
-  // 找到对应节点标记 active（通过文本匹配）
-  document.querySelectorAll('.node-item').forEach(function(el) {
     if (el.textContent.indexOf(suffix) === 0) {
       el.classList.add('active');
     }
@@ -379,6 +371,17 @@ function switchNode(suffix) {
       hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix;
     }
   });
+  // 更新全局延迟（从上次竞速结果中取）
+  if (window._lastRaceResults && window._lastRaceResults[suffix] != null && window._lastRaceResults[suffix] < 99999) {
+    var hints2 = document.querySelectorAll('.section-hint');
+    hints2.forEach(function(hint) {
+      var text = hint.textContent;
+      var idx = text.indexOf('当前节点:');
+      if (idx !== -1) {
+        hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix + ' (' + window._lastRaceResults[suffix] + 'ms)';
+      }
+    });
+  }
 }
 
 init();
