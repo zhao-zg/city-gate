@@ -1,0 +1,31 @@
+name: Keep Repository Active
+
+# 防止 GitHub Actions 免费版因仓库闲置（60 天无活动）而暂停 schedule 工作流
+# 每周日凌晨 3 点 UTC（北京时间上午 11 点）发一个空 commit 保持仓库活跃
+# 若无法创建空 commit（如仓库禁止 push），自动创建 issue 提醒
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 保持仓库活跃（空提交或 issue 提醒）
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          # 用空 commit 保持活跃；设为 true 则改为创建 issue 提醒
+          use_api: false
+          # 自动创建 issue 提醒（use_api 为 false 时仍可在提交失败时兜底）
+          auto_issue: true
+          # 提交作者信息
+          commit_message: 'chore: keep repository active [skip ci]'

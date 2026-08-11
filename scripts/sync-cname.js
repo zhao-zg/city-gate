@@ -31,6 +31,7 @@
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
 
 // ── Worker → 账户 Token 映射 ──────────────────────────────
@@ -42,17 +43,21 @@ const WORKER_TOKEN_KEYS = {
 
 // ── 优选域名池 ─────────────────────────────────────────
 // 每个 zone 分配池中一个域名，zone 内所有子域名指向同一优选域名
-// 注意：saas.sin.fan / eii.at 会触发 CF 1034（CNAME 链嵌套 SaaS），已移除
+// 注意：1034（Edge IP Restricted）按"受限 IP 空间 × 未授权 Host"触发，
+//       无法用 IP 段猜测。validatePool 会用自家域名做真实请求验证，
+//       响应含 "error code: 1034" 的域名自动跳过，只使用安全域名。
 const CNAME_POOL = [
   'cf.090227.xyz',
   'cf.877774.xyz',
-  'cloudflare.seeck.cn',
   'cf.cloudflare.182682.xyz',
   '1.cf.3666888.xyz',
-  'anycubic.com',
   'www.shopify.com',
   'cf.yfjc.sbs',
-  'mfa.gov.ua'
+  'icook.hk',
+  'cf-cname.xingpingcn.top',
+  'zzg.cf.959923.xyz',
+  'ips.993888.xyz',
+  'bestcf.030101.xyz'
 ];
 
 // ── 从 wrangler.toml 自动提取 Zone 配置 ──────────────────
@@ -146,25 +151,48 @@ function autoDetectZoneMap() {
   return allZones;
 }
 
+// ── Cloudflare 公共保留 IP（解析到这些 IP 必触发 1034，快速短路）──────────
+// 1034 由 Edge IP Validation (EIV) 触发，保护"特定账户专用"的受限 IP 空间
+// （BYOIP 前缀、专用/静态 IP、CF for SaaS 客户关联 IP 段）。
+// 注意：**不能**用 IP 段（如 172.64.0.0/13）一刀切——实测同一段内
+//       172.64.52.173 触发 1034、172.64.153.208 正常。
+//       真正的判定靠真实请求验证（见 checkPoolDomain）。
+// 以下仅作快速短路；resolveIps 只查 A 记录，故不含 IPv6 条目。
+const CF_PUBLIC_RESERVED_IPS = [
+  '1.1.1.1', '1.0.0.1',           // Cloudflare Public DNS（官方确认 1034）
+  '198.51.100.1', '100::1',        // Cloudflare 官方推荐占位 IP
+];
+
 // ── 优选域名有效性检测 ─────────────────────────────────────
-const POOL_CHECK_TIMEOUT = 5000;  // 单个优选域名检测超时（ms）
-const POOL_CHECK_HTTPS = false;   // HTTPS 连通检测（仅警告，不影响有效性判定）
+const POOL_CHECK_TIMEOUT = 4000;   // 单次请求超时（ms）
+const POOL_RESOLVE_ROUNDS = 3;     // 每个域名 DNS 解析轮数（收集轮询 IP）
+const POOL_IP_RETRIES = 3;         // 软错误（超时/连接失败）重试次数，消除抖动
 
 /**
- * DNS 解析检测（优先用 Node.js 内置 dns 模块，失败回退 DoH）
+ * 快速短路：是否为已知 CF 公共保留 IP（1.1.1.1 等，官方确认必触发 1034）
+ * 其余 IP 是否触发 1034 无法按 IP/段判断，交给真实请求验证 testIp1034
  */
-async function checkDns(domain) {
-  // ── 主路径：Node.js dns.resolve4 ──
-  try {
-    await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
-    return { ok: true };
-  } catch (err) {
-    if (err.code === 'ENOTFOUND') {
-      return { ok: false, reason: 'NXDOMAIN（域名不存在）' };
-    }
-    // 其他 DNS 错误（超时、SERVFAIL 等），不直接判定无效，回退 DoH
-  }
+function is1034Ip(ip) {
+  return CF_PUBLIC_RESERVED_IPS.includes(ip);
+}
 
+/**
+ * 解析域名并返回所有 A 记录 IP（多次解析收集去重）
+ * 轮询域名（同一域名不同时刻解析到不同 IP）多次查询能覆盖更多 IP，
+ * 尽可能测全域名暴露的所有 A 记录
+ */
+async function resolveIps(domain) {
+  const ips = new Set();
+  // ── 主路径：Node.js dns.resolve4 多次解析收集 ──
+  for (let round = 0; round < POOL_RESOLVE_ROUNDS; round++) {
+    try {
+      const addrs = await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
+      for (const a of addrs) ips.add(a);
+    } catch (_) {
+      // 该轮失败，继续下一轮
+    }
+  }
+  if (ips.size > 0) return [...ips];
   // ── 回退：Cloudflare DoH ──
   try {
     const dohUrl = `https://cloudflare-dns.com/dns-query?name=${domain}&type=A`;
@@ -173,19 +201,17 @@ async function checkDns(domain) {
       signal: AbortSignal.timeout(POOL_CHECK_TIMEOUT),
     });
     const dohJson = await dohRes.json();
-
-    if (dohJson.Status === 3) {
-      return { ok: false, reason: 'NXDOMAIN（域名不存在）' };
+    if (dohJson.Answer) {
+      for (const a of dohJson.Answer) {
+        if (a.type === 1 && a.data && /^\d+\.\d+\.\d+\.\d+$/.test(a.data)) {
+          ips.add(a.data);
+        }
+      }
     }
-    const hasAnswer = dohJson.Answer?.length > 0;
-    if (!hasAnswer && dohJson.Status !== 0) {
-      return { ok: false, reason: `DNS RCODE=${dohJson.Status}` };
-    }
-    return { ok: true };
-  } catch {
-    // DNS 和 DoH 都不确定，保守视为有效（避免误剔除）
-    return { ok: true, reason: 'DNS 不确定，保守视为有效' };
+  } catch (_) {
+    // 忽略
   }
+  return [...ips];
 }
 
 /** Promise 包装 dns.resolve4，带超时 */
@@ -201,60 +227,139 @@ function dnsResolve4(domain, timeout) {
 }
 
 /**
- * HTTPS 连通性检测
+ * 真实请求验证（单次）：用自家域名（testHost）做 Host + SNI 直连指定 IP
+ * 响应含 "error code: 1034" → 该 IP 处于受限空间且 Host 未授权 → 不可用
+ * 其他任何 HTTP 响应（200/403/530 等）都说明网络通路正常 → 可用
+ * 注意：testHost 必须是**真实存在 CNAME 记录**的自家子域名，
+ *       不存在的子域名只会得到 1016（Origin DNS error），无法触发 1034 判定
  */
-async function checkHttps(domain) {
-  try {
-    await fetch(`https://${domain}/`, {
-      method: 'HEAD',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(POOL_CHECK_TIMEOUT),
+function testIp1034Once(ip, testHost) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
+    let body = '';
+
+    const req = https.request({
+      host: ip,
+      servername: testHost,       // SNI
+      headers: { Host: testHost },
+      path: '/',
+      method: 'GET',
+      timeout: POOL_CHECK_TIMEOUT,
+      rejectUnauthorized: false,  // 忽略证书不匹配（不影响可用性判定）
+    }, (res) => {
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length >= 8192) {
+          // 1034 错误页远小于 8KB，到这里还没出现说明不是 1034
+          res.destroy();
+          finish({ ok: true, reason: `HTTP ${res.statusCode}` });
+        } else if (/error code:\s*1034|error 1034/i.test(body)) {
+          res.destroy();
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034` });
+        }
+      });
+      res.on('end', () => {
+        finish(/error code:\s*1034|error 1034/i.test(body)
+          ? { ok: false, reason: `HTTP ${res.statusCode} 1034` }
+          : { ok: true, reason: `HTTP ${res.statusCode}` });
+      });
     });
-    // 任何响应都算连通（403/503 也说明网络通了）
-    return { ok: true };
-  } catch (e) {
-    const msg = e.cause?.code || e.message || '';
-    // 证书错误：DNS 已通，CNAME 层面仍有效
-    if (msg.includes('CERT') || msg.includes('certificate') || msg.includes('UNABLE_TO_VERIFY')) {
-      return { ok: true, reason: 'HTTPS 证书不匹配（不影响 CNAME）' };
-    }
-    // 连接被拒/超时
-    return { ok: false, reason: `HTTPS 连接失败: ${msg.slice(0, 60)}` };
-  }
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ ok: false, reason: '连接超时' });
+    });
+    req.on('error', (e) => {
+      const msg = e.code || e.message || '';
+      // 证书类错误说明 TLS 已通到 CF 边缘，CNAME 层面仍有效
+      if (/CERT|TLS|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(String(msg))) {
+        finish({ ok: true, reason: 'TLS 证书不匹配（网络已通）' });
+      } else {
+        finish({ ok: false, reason: `连接失败: ${String(msg).slice(0, 40)}` });
+      }
+    });
+
+    req.end();
+  });
 }
 
 /**
- * 检测单个优选域名是否有效
- * 1. DNS 解析：能解析出 A 记录
- * 2. HTTPS 连通：能建立 TLS 连接（可选）
+ * 真实请求验证（带重试）：
+ * - 成功（ok）→ 直接返回
+ * - 1034（硬判定，IP 受限是稳定特性）→ 直接接受，重试不会改变结果
+ * - 软错误（超时/连接失败/ECONNRESET 等）→ 重试 POOL_IP_RETRIES 次
+ *   实测部分 IP 偶发连接失败（如 2/3 能连上），多重试可避免误判
  */
-async function checkPoolDomain(domain) {
-  const dnsResult = await checkDns(domain);
-  if (!dnsResult.ok) {
-    return { ok: false, reason: dnsResult.reason };
+async function testIp1034(ip, testHost) {
+  let last;
+  for (let attempt = 0; attempt < POOL_IP_RETRIES; attempt++) {
+    last = await testIp1034Once(ip, testHost);
+    if (last.ok) return last;                                  // 可用
+    if (/1034/i.test(last.reason)) return last;                // 硬判定
+    // 软错误 → 继续重试
   }
-
-  // HTTPS 检测仅作参考，不决定有效性
-  if (POOL_CHECK_HTTPS) {
-    const httpsResult = await checkHttps(domain);
-    if (!httpsResult.ok) {
-      return { ok: true, reason: `DNS 正常，HTTPS 不可达（仅警告）: ${httpsResult.reason}` };
-    }
-    return { ok: true, reason: httpsResult.reason };
-  }
-
-  return { ok: true, reason: dnsResult.reason };
+  return last;
 }
 
 /**
- * 并发检测优选域名池，返回有效域名列表和检测报告
+ * 生成 1034 真实请求验证用的测试 Host
+ * 取第一个 zone 的第一个前缀（如 sg.1189.dpdns.org）
+ * 必须是自家真实 zone 且该 FQDN 会配置 CNAME，才能正确触发 EIV 判定；
+ * 首次运行（记录尚未创建）可能显示 1016 而误判可用，第二次运行自动纠正
  */
-async function validatePool(pool) {
+function buildTestHost(zoneMap) {
+  if (zoneMap.length === 0) return null;
+  const first = zoneMap[0];
+  const prefix = first.names[0] || 'www';
+  return `${prefix}.${first.zoneName}`;
+}
+
+/**
+ * 检测单个优选域名是否可用：
+ * 1. DNS 解析（无 A 记录 → 不可用）
+ * 2. 快速短路：解析到 CF 公共保留 IP（1.1.1.1 等）→ 必 1034，不可用
+ * 3. 真实请求验证：用自家域名做 Host 逐 IP 访问
+ *    多个 IP 时只要有一个可用即视为可用（用户可能随机命中任一 IP）
+ */
+async function checkPoolDomain(domain, testHost) {
+  const ips = await resolveIps(domain);
+
+  if (ips.length === 0) {
+    return { ok: false, reason: 'NXDOMAIN（域名无法解析）' };
+  }
+
+  // 快速短路：解析到已知保留 IP 必触发 1034
+  const reservedIps = ips.filter(ip => is1034Ip(ip));
+  if (reservedIps.length > 0) {
+    return { ok: false, reason: `解析到 CF 保留 IP: ${reservedIps.join(', ')}（必 1034）` };
+  }
+
+  // 真实请求验证：对每个 IP 用自家域名做 Host 访问
+  const checks = await Promise.all(ips.map(ip => testIp1034(ip, testHost)));
+  const good = checks.filter(r => r.ok);
+
+  if (good.length === 0) {
+    const reasons = [...new Set(checks.map(r => r.reason))];
+    return { ok: false, reason: reasons.join('; ') };
+  }
+  if (good.length < checks.length) {
+    return { ok: true, reason: `⚠ ${checks.length - good.length}/${checks.length} IP 触发 1034，仍有 ${good.length} 个可用` };
+  }
+  return { ok: true, reason: `IP 可用: ${ips.join(', ')}` };
+}
+
+/**
+ * 并发检测优选域名池，返回安全域名列表和检测报告
+ * 用自家域名做真实请求验证，有 1034 风险的域名自动跳过，只使用安全域名
+ */
+async function validatePool(pool, testHost) {
   console.log('\n── 优选域名池有效性检测 ──');
+  console.log(`  测试 Host: ${testHost}（真实请求验证 1034）\n`);
 
   const results = await Promise.all(
     pool.map(async (domain) => {
-      const result = await checkPoolDomain(domain);
+      const result = await checkPoolDomain(domain, testHost);
       const status = result.ok ? '✓' : '✗';
       const reason = result.reason || '';
       console.log(`  ${status}  ${domain.padEnd(32)} ${reason ? '— ' + reason : ''}`);
@@ -266,12 +371,12 @@ async function validatePool(pool) {
   const invalid = results.filter(r => !r.ok);
 
   if (invalid.length > 0) {
-    console.log(`\n  ⚠  ${invalid.length} 个优选域名无效，已从池中剔除:`);
+    console.log(`\n  ⚠  ${invalid.length} 个域名有 1034 风险，已跳过:`);
     for (const r of invalid) {
       console.log(`     - ${r.domain}: ${r.reason}`);
     }
   }
-  console.log(`  池大小: ${pool.length} → ${valid.length}（剔除 ${pool.length - valid.length}）`);
+  console.log(`  池大小: ${pool.length}，安全可用: ${valid.length}`);
 
   return { valid, invalid };
 }
@@ -288,8 +393,9 @@ async function buildAssignmentPlan() {
   }
   console.log(`  共 ${ZONE_MAP.length} 个 Zone 需同步\n`);
 
-  // 第1步：检测优选域名池有效性
-  const { valid: validPool } = await validatePool(CNAME_POOL);
+  // 第1步：检测优选域名池有效性（真实请求验证 1034，自动跳过风险域名）
+  const testHost = buildTestHost(ZONE_MAP);
+  const { valid: validPool } = await validatePool(CNAME_POOL, testHost);
 
   if (validPool.length === 0) {
     throw new Error('所有优选域名均无效，无法继续同步！');
