@@ -23,12 +23,15 @@ const GENERATED_SUFFIX = '.generated.toml';
 // ── 从 DOMAIN_CONFIG_JSON 展开完整域名列表 ───────────────
 function expandDomains(config) {
   // 新格式：zones + prefixes
+  // zones 元素支持字符串或对象 { name, noPreferred }（noPreferred 仅影响 DNS 同步，不影响路由生成）
   if (config.zones && Array.isArray(config.groups)) {
     const domains = [];
     for (const group of config.groups) {
       const zones = group.zones || config.zones;
       for (const zone of zones) {
-        domains.push(`${group.prefix}.${zone}`);
+        const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
+        if (!zoneName) continue;
+        domains.push(`${group.prefix}.${zoneName}`);
       }
     }
     return [...new Set(domains)].sort();

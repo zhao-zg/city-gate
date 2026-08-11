@@ -67,6 +67,41 @@ ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载�
 - `domains`：共享以上规则的域名列表
 - `origin`：反向代理源站
 
+### zones + prefixes 格式（推荐）
+
+当前仓库采用 `zones + prefixes` 结构（见 `wrangler.toml`）：域名拆分为 zone（注册域）与 prefix（子域名前缀），运行时自动展开 `prefix.zone` 为完整域名，避免逐个重复。
+
+```json
+{
+  "zones": ["1189.dpdns.org", "zzg.cc.cd"],
+  "groups": [
+    { "prefix": "sg", "origin": "https://sg-f3b.pages.dev", "cities": ["ALL"] },
+    { "prefix": "bible", "origin": "https://bible-bka.pages.dev", "cities": ["杭州"] }
+  ]
+}
+```
+
+### 不使用优选域名（noPreferred）
+
+`zones` 元素支持两种写法：
+
+- 字符串（默认）：使用优选域名。`sync-cname.js` 会从优选域名池为该 zone 分配一个优选域名，子域名 CNAME 指向它。
+- 对象：`{ "name": "zzg.cc.cd", "noPreferred": true }` — **不使用优选域名**。同步脚本跳过优选域名池，将该 zone 的子域名直接 CNAME 到各前缀对应的源站 `origin`（如 `sg.zzg.cc.cd → sg-f3b.pages.dev`），适用于不需要优选线路的域名。
+
+```json
+{
+  "zones": [
+    "1189.dpdns.org",
+    { "name": "zzg.cc.cd", "noPreferred": true }
+  ],
+  "groups": [
+    { "prefix": "sg", "origin": "https://sg-f3b.pages.dev", "cities": ["ALL"] }
+  ]
+}
+```
+
+> `noPreferred` 仅影响 DNS 同步（`sync-cname.js`）的 CNAME 目标选择，不影响 Worker 网关与路由生成。
+
 ## 添加新域名
 
 1. 在 `wrangler.toml` 的 `DOMAIN_CONFIG_JSON` 对应分组中追加域名

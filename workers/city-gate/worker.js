@@ -63,7 +63,10 @@ export default {
         const provinces = group.provinces || [];
         const zones = group.zones || config.zones; // 组级可覆盖 zone 列表
         for (const zone of zones) {
-          const domain = `${group.prefix}.${zone}`;
+          // zones 元素兼容字符串或对象 { name, noPreferred }（noPreferred 仅影响 DNS 同步，不影响网关）
+          const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
+          if (!zoneName) continue;
+          const domain = `${group.prefix}.${zoneName}`;
           domainMap[domain] = { cities, provinces, origin: group.origin, schedule: group.schedule || null };
         }
       }

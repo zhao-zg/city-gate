@@ -13,6 +13,12 @@ compatibility_date = "2024-12-01"
 binding = "IP2REGION"
 id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 
+# ── 域名配置（唯一配置来源）───────────────────────────
+# zones 数组元素支持两种写法：
+#   "zhaozg.de5.net"                                  → 使用优选域名（默认）
+#   { "name": "zhaozg.de5.net", "noPreferred": true } → 不使用优选域名，
+#     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
+#     各前缀对应的源站 origin，不分配优选域名池
 [vars]
 DOMAIN_CONFIG_JSON = """
 {

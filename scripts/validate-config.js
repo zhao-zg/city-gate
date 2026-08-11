@@ -92,8 +92,26 @@ for (const dir of ['workers/city-gate', 'workers/city-gate-2']) {
     }, 0);
     console.log(file, '->', format, '格式, 分组数:', groups.length, '域名数:', domainCount);
 
-    // 校验 schedule
+    // 校验 zones 元素格式（支持字符串或 { name, noPreferred }）
     let hasErrors = false;
+    for (const zone of config.zones || []) {
+      if (typeof zone === 'string') continue;
+      if (typeof zone === 'object' && zone !== null) {
+        if (typeof zone.name !== 'string' || !zone.name) {
+          console.error('  ERROR: zones 对象缺少 name 字段:', JSON.stringify(zone));
+          hasErrors = true;
+        }
+        if (zone.noPreferred !== undefined && typeof zone.noPreferred !== 'boolean') {
+          console.error(`  ERROR: zone "${zone.name || '?'}" 的 noPreferred 必须为布尔值`);
+          hasErrors = true;
+        }
+      } else {
+        console.error('  ERROR: zones 元素必须为字符串或对象:', JSON.stringify(zone));
+        hasErrors = true;
+      }
+    }
+
+    // 校验 schedule
     for (const g of groups) {
       if (!g.schedule) continue;
       const prefix = g.prefix || g.domains?.[0] || 'unknown';

@@ -103,7 +103,32 @@ function parseWorkerName(tomlText) {
 }
 
 /**
- * 从 DOMAIN_CONFIG_JSON 展开为 { zoneName, names, tokenKey } 列表
+ * 从 zones 元素提取 zone 名称
+ * 兼容两种写法：字符串 "zzg.cc.cd" 或对象 { name, noPreferred }
+ */
+function zoneNameOf(zone) {
+  return typeof zone === 'string' ? zone : (zone && typeof zone.name === 'string' ? zone.name : null);
+}
+
+/**
+ * 判断 zone 是否标记为"不使用优选域名"
+ * 标记方式：{ "name": "zzg.cc.cd", "noPreferred": true }
+ * noPreferred zone 不分配优选域名池，子域名直接 CNAME 到各前缀对应源站
+ */
+function isNoPreferredZone(zone) {
+  return typeof zone === 'object' && zone !== null && zone.noPreferred === true;
+}
+
+/**
+ * 剥离协议前缀，得到裸域名（CNAME content 使用）
+ * https://sg-f3b.pages.dev → sg-f3b.pages.dev
+ */
+function stripProtocol(url) {
+  return String(url || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+/**
+ * 从 DOMAIN_CONFIG_JSON 展开为 { zoneName, names, tokenKey, noPreferred?, origins? } 列表
  */
 function buildZoneMapFromConfig(config, workerName) {
   const tokenKey = WORKER_TOKEN_KEYS[workerName] || 'default';
@@ -113,12 +138,41 @@ function buildZoneMapFromConfig(config, workerName) {
   if (config.zones && Array.isArray(config.groups)) {
     // 按前缀去重收集
     const prefixSet = new Set();
+    // zone 级信息：noPreferred 标记 + 各前缀对应的源站 origin
+    // （noPreferred zone 不分配优选域名，直接 CNAME 到源站，需要 prefix → origin 映射）
+    const zoneInfo = new Map();
+
     for (const group of config.groups) {
       prefixSet.add(group.prefix);
+
+      const groupZones = group.zones || config.zones;
+      for (const zone of groupZones) {
+        const zoneName = zoneNameOf(zone);
+        if (!zoneName) continue;
+        const noPreferred = isNoPreferredZone(zone);
+
+        let info = zoneInfo.get(zoneName);
+        if (!info) {
+          info = { noPreferred: false, origins: {} };
+          zoneInfo.set(zoneName, info);
+        }
+        if (noPreferred) info.noPreferred = true;
+
+        // noPreferred zone 需要记录每个前缀对应的源站（CNAME 直连目标）
+        if (info.noPreferred && group.origin) {
+          info.origins[group.prefix] = stripProtocol(group.origin);
+        }
+      }
     }
+
     const names = [...prefixSet];
-    for (const zone of config.zones) {
-      zones.push({ zoneName: zone, names, tokenKey });
+    for (const [zoneName, info] of zoneInfo) {
+      zones.push({
+        zoneName,
+        names,
+        tokenKey,
+        ...(info.noPreferred ? { noPreferred: true, origins: info.origins } : {}),
+      });
     }
     return zones;
   }
@@ -354,7 +408,9 @@ async function testIp1034(ip, testHost) {
  */
 function buildTestHost(zoneMap) {
   if (zoneMap.length === 0) return null;
-  const first = zoneMap[0];
+  // 优先选使用优选域名的 zone（其 CNAME 指向池内域名，最贴近实际场景）；
+  // noPreferred zone 直连源站，不作为 1034 测试 Host
+  const first = zoneMap.find(z => !z.noPreferred) || zoneMap[0];
   const prefix = first.names[0] || 'www';
   return `${prefix}.${first.zoneName}`;
 }
@@ -553,13 +609,37 @@ async function buildAssignmentPlan() {
   // 第1.5步：池自动补充（有效域名不足时从 cfIpTop20 拉取候选检测补充）
   // GitHub Actions 定时运行时，若池内域名因 1034 被大量跳过或 zone 增多导致不足，
   // 自动拉取实时优选 Top20 检测后补足，保证每个 zone 都有独立优选域名。
-  const finalPool = await autoRefillPool(validPool, testHost, ZONE_MAP.length);
+  // noPreferred（不使用优选域名）的 zone 不占用池，直连源站
+  const poolZones = ZONE_MAP.filter(z => !z.noPreferred);
+  const finalPool = await autoRefillPool(validPool, testHost, poolZones.length);
 
   // 第2步：每个 zone 分配一个优选域名，zone 内所有子域名指向同一目标
+  // noPreferred zone 跳过优选域名池，各前缀直接 CNAME 到对应源站 origin
   const assignments = [];
-  for (let z = 0; z < ZONE_MAP.length; z++) {
-    const zone = ZONE_MAP[z];
-    const target = finalPool[z % finalPool.length];
+  let poolIdx = 0;
+  for (const zone of ZONE_MAP) {
+    if (zone.noPreferred) {
+      for (const name of zone.names) {
+        const origin = (zone.origins && zone.origins[name]) || null;
+        if (!origin) {
+          console.log(`  ⚠ ${name}.${zone.zoneName} 无对应源站 origin，跳过（请检查 DOMAIN_CONFIG_JSON）`);
+          continue;
+        }
+        assignments.push({
+          fqdn: `${name}.${zone.zoneName}`,
+          zoneName: zone.zoneName,
+          name,
+          tokenKey: zone.tokenKey,
+          target: origin,
+          direct: true, // 直连源站，非优选域名
+        });
+      }
+      continue;
+    }
+
+    const target = finalPool[poolIdx % finalPool.length];
+    const poolIndex = poolIdx % validPool.length;
+    poolIdx++;
     for (const name of zone.names) {
       assignments.push({
         fqdn: `${name}.${zone.zoneName}`,
@@ -567,7 +647,7 @@ async function buildAssignmentPlan() {
         name,
         tokenKey: zone.tokenKey,
         target,
-        poolIndex: z % validPool.length,
+        poolIndex,
       });
     }
   }
@@ -643,19 +723,20 @@ function printAssignmentPlan(assignments) {
   console.log('\n┌──────────────────────────────────────────────────────────────┐');
   console.log('│  CNAME 分配计划（轮询分配）                                    │');
   console.log('├──────────────────────────────────────────────────────────────┤');
-  console.log('│  FQDN                              →  优选域名              │');
+  console.log('│  FQDN                              →  目标                  │');
   console.log('├──────────────────────────────────────────────────────────────┤');
   for (const a of assignments) {
-    console.log(`│  ${a.fqdn.padEnd(34)} →  ${a.target.padEnd(24)} │`);
+    const kind = a.direct ? '源站' : '优选';
+    console.log(`│  ${a.fqdn.padEnd(34)} →  [${kind}] ${a.target.padEnd(20)} │`);
   }
   console.log('└──────────────────────────────────────────────────────────────┘');
 
-  // 按优选域名分组统计
+  // 按目标分组统计（优选域名 / 源站直连分开）
   const byTarget = {};
   for (const a of assignments) {
     byTarget[a.target] = (byTarget[a.target] || 0) + 1;
   }
-  console.log('\n  优选域名分配统计:');
+  console.log('\n  目标分配统计:');
   for (const [target, count] of Object.entries(byTarget).sort((a, b) => b[1] - a[1])) {
     console.log(`    ${target.padEnd(30)} × ${count}`);
   }
