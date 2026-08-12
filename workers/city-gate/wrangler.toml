@@ -37,6 +37,8 @@ DOMAIN_CONFIG_JSON = """
       "prefix": "books",
       "origin": "https://books-em3.pages.dev",
       "cities": ["ALL"],
+      "cities": ["杭州", "Hangzhou"],
+      "provinces": ["浙江", "Zhejiang"],
       "schedule": {
         "days": [1, 2, 3, 4, 5, 6, 7],
         "periods": ["01:00-22:00"]
