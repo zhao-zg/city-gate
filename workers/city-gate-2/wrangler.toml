@@ -27,14 +27,16 @@ DOMAIN_CONFIG_JSON = """
     {
       "prefix": "sg",
       "origin": "https://sg-7gj.pages.dev",
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"]
+      "cities": ["ALL"]
     },
     {
       "prefix": "books",
       "origin": "https://books-89r.pages.dev",
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"]
+      "cities": ["ALL"],
+      "schedule": {
+        "days": [1, 2, 3, 4, 5, 6, 7],
+        "periods": ["01:00-22:00"]
+      }
     },
     {
       "prefix": "bible",
