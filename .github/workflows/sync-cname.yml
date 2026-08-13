@@ -19,6 +19,7 @@ on:
     branches: [master]
     paths:
       - 'scripts/sync-cname.js'
+      - 'workers/**/wrangler.toml'
 
 jobs:
   sync-cname:
