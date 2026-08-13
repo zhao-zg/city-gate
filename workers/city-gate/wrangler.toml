@@ -17,11 +17,13 @@ id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 #   { "name": "zzg.cc.cd", "noPreferred": true }  → 不使用优选域名，
 #     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
 #     各前缀对应的源站 origin，不分配优选域名池
+#
+# 不优选域名{ "name": "zhaozg.dpdns.org", "noPreferred": true },
 [vars]
 DOMAIN_CONFIG_JSON = """
 {
   "zones": [
-    { "name": "1189.dpdns.org", "noPreferred": true },
+    "1189.dpdns.org",
     "zhaozg.dpdns.org",
     "1189.de5.net",
     "zzg.cc.cd",
