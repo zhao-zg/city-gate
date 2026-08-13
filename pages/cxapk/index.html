@@ -88,6 +88,10 @@
   .app-action--ios:hover{box-shadow:0 2px 8px rgba(22,119,255,0.35);transform:translateY(-1px)}
   .app-action--ios:active{transform:scale(.97)}
   .app-action[disabled]{opacity:.5;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+  .section-icon--answer{background:var(--antd-warning)}
+  .app-action--answer{background:var(--antd-warning);color:#fff}
+  .app-action--answer:hover{box-shadow:0 2px 8px rgba(255,125,0,0.35);transform:translateY(-1px)}
+  .app-action--answer:active{transform:scale(.97)}
 
   /* 节点切换器 */
   .node-switcher{margin-top:6px}
@@ -138,6 +142,20 @@
   <div class="node-switcher">
     <button class="node-switcher-toggle" id="node-toggle">切换节点 ▾</button>
     <div class="node-switcher-list" id="node-list"></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-head">
+    <span class="section-icon section-icon--answer">💬</span>
+    <h2>Answer 问答社区</h2>
+  </div>
+  <p class="section-hint">点击进入问答社区</p>
+  <div class="app-card">
+    <div class="app-row">
+      <div class="app-info"><span class="app-dot" style="background:var(--antd-warning)"></span><span class="app-name">Answer</span></div>
+      <button class="app-action app-action--answer" id="answer-btn" disabled>竞速中…</button>
+    </div>
   </div>
 </div>
 
@@ -284,6 +302,15 @@ function bindButtons(suffix) {
       openPwa(newBtn.getAttribute('data-prefix'), suffix);
     });
   });
+  // Answer button
+  var answerBtn = document.getElementById('answer-btn');
+  if (answerBtn) {
+    var newAnswerBtn = answerBtn.cloneNode(true);
+    answerBtn.parentNode.replaceChild(newAnswerBtn, answerBtn);
+    newAnswerBtn.addEventListener('click', function() {
+      location.href = 'https://answer.' + suffix;
+    });
+  }
 }
 
 function init() {
@@ -302,6 +329,11 @@ function init() {
       btn.disabled = false;
       btn.textContent = '打开 PWA';
     });
+    var answerBtn = document.getElementById('answer-btn');
+    if (answerBtn) {
+      answerBtn.disabled = false;
+      answerBtn.textContent = '打开 Answer';
+    }
     bindButtons(suffix);
     // Show fastest suffix and latency
     var hint = document.querySelector('.section-hint');

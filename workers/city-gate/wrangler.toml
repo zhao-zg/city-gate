@@ -64,6 +64,11 @@ DOMAIN_CONFIG_JSON = """
       "prefix": "apk",
       "origin": "https://cxapk-ah0.pages.dev",
       "cities": ["ALL"]
+    },
+    {
+      "prefix": "answer",
+      "origin": "https://answer.07170501.xyz",
+      "cities": ["ALL"]
     }
   ]
 }
