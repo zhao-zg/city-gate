@@ -121,21 +121,29 @@ async function buildIpPool(testHost, poolZonesCount = 1) {
     console.log(`    ${domain.padEnd(32)} → ${ips.length} 个 IP`);
   }
 
-  // 第2步：从 cfIpTop20 补充 IP
-  console.log(`\n  [2] 从 cfIpTop20 补充 IP...`);
-  try {
-    const top20 = await sc.fetchCfTop20();
-    for (const domain of top20) {
-      const ips = await sc.resolveIps(domain);
-      for (const ip of ips) {
-        if (!sc.is1034Ip(ip)) {
-          rawIps.add(ip);
+  // 第2步：从 cfIpTop20 补充 IP（池内 IP 已够则跳过）
+  const minNeeded = poolZonesCount * IP_PER_ZONE;
+  // 估算通过率 ~70%，收集量达到需求 2 倍即可跳过 Top20
+  const skipThreshold = minNeeded * 2;
+
+  if (rawIps.size >= skipThreshold) {
+    console.log(`\n  [2] 池内已有 ${rawIps.size} 个 IP（≥ ${skipThreshold}），跳过 cfIpTop20 补充`);
+  } else {
+    console.log(`\n  [2] 池内仅 ${rawIps.size} 个 IP（< ${skipThreshold}），从 cfIpTop20 补充...`);
+    try {
+      const top20 = await sc.fetchCfTop20();
+      for (const domain of top20) {
+        const ips = await sc.resolveIps(domain);
+        for (const ip of ips) {
+          if (!sc.is1034Ip(ip)) {
+            rawIps.add(ip);
+          }
         }
       }
+      console.log(`    cfIpTop20 补充后总计: ${rawIps.size} 个唯一 IP`);
+    } catch (e) {
+      console.log(`    cfIpTop20 拉取失败: ${e.message}，继续用池内 IP`);
     }
-    console.log(`    cfIpTop20 补充后总计: ${rawIps.size} 个唯一 IP`);
-  } catch (e) {
-    console.log(`    cfIpTop20 拉取失败: ${e.message}，继续用池内 IP`);
   }
 
   if (rawIps.size === 0) {
@@ -182,9 +190,7 @@ async function buildIpPool(testHost, poolZonesCount = 1) {
 
   // 第4步：自适应去重，按延迟排序
   // 如果 /N 去重后数量不够（少于 zone 数 × IP_PER_ZONE），自动放宽前缀长度
-  const minNeeded = poolZonesCount * IP_PER_ZONE;
   let deduped = [];
-  let curPrefix = IP_DEDUP_PREFIX;
   const validPrefixes = [32, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16];
 
   // 从用户配置的前缀开始，逐步放宽直到数量够或到 /16
