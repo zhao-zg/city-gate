@@ -91,8 +91,8 @@ case "${1:-cron}" in
     echo "╚════════════════════════════════════════════════╝"
     echo ""
 
-    # 写入 crontab
-    echo "$CRON_EXPR cd /app && /entrypoint.sh run >> ${LOG_DIR}/cron.log 2>&1" \
+    # 写入 crontab（crond 子进程不继承环境变量，需在命令前显式 export TZ）
+    echo "$CRON_EXPR export TZ=${TZ:-Asia/Shanghai}; cd /app && /entrypoint.sh run >> ${LOG_DIR}/cron.log 2>&1" \
       | crontab -
 
     echo "[INFO] 已注册 crontab: $CRON_EXPR"
@@ -100,6 +100,7 @@ case "${1:-cron}" in
     /entrypoint.sh run || true
 
     echo "[INFO] cron 守护启动"
+    export TZ="${TZ:-Asia/Shanghai}"
     crond -f -l 2 -L "${LOG_DIR}/cron.log"
     ;;
 
