@@ -28,6 +28,7 @@ const sc = require('./sync-cname');
 const CF_API = 'https://api.cloudflare.com/client/v4';
 const FALLBACK_IP = '192.0.2.1';        // RFC 5737 文档保留 IP，CF SaaS 占位用
 const FALLBACK_PREFIX = 'proxy-fallback'; // Fallback Origin DNS 记录前缀
+const ORIGIN_PREFIX = 'o-';              // origin CNAME 前缀，如 o-sg.1189.kdns.fr → sg-f3b.pages.dev
 const POLL_TIMEOUT_MS = 30000;           // Fallback Origin 状态轮询超时
 const POLL_INTERVAL_MS = 2000;           // 轮询间隔
 const CH_POLL_TIMEOUT_MS = 60000;        // Custom Hostname 状态轮询超时
@@ -340,6 +341,48 @@ async function processZone(zoneName, tokenKey, fqdns) {
     // 继续尝试创建 Custom Hostnames
   }
 
+  // ── Step 2b: 为每个 prefix 创建 origin CNAME 记录 ──
+  // CF for SaaS 要求 custom_origin_server 必须是 zone 内的 proxied DNS 记录
+  // 因此为每个 prefix 创建 o-{prefix}.{zone} CNAME → {origin} (proxied=true)
+  const originCnameMap = {}; // { fqdn: originCname }
+  const seenPrefixes = new Set();
+  for (const f of fqdns) {
+    if (seenPrefixes.has(f.prefix)) continue;
+    seenPrefixes.add(f.prefix);
+
+    const originCname = `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
+    const originTarget = f.origin; // e.g. sg-f3b.pages.dev
+    originCnameMap[f.prefix] = originCname;
+
+    console.log(`\n  [Origin CNAME] ${originCname} → ${originTarget} (proxied=true)`);
+    try {
+      const existing = await getDnsRecord(zoneId, originCname, 'CNAME', tokenKey);
+      const matched = existing.filter(r => r.content === originTarget && r.proxied === true);
+
+      if (matched.length > 0) {
+        console.log(`    CNAME 已存在且匹配 → 跳过`);
+      } else {
+        // 删除旧记录
+        for (const rec of existing) {
+          console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
+          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+        }
+        console.log(`    创建 CNAME → ${originTarget} (proxied=true)`);
+        if (!dryRun) {
+          await createDnsRecord(zoneId, {
+            type: 'CNAME',
+            name: originCname,
+            content: originTarget,
+            proxied: true,
+            ttl: 1,
+          }, tokenKey);
+        }
+      }
+    } catch (e) {
+      console.error(`    ✗ Origin CNAME 操作失败: ${e.message}`);
+    }
+  }
+
   // ── Step 3: Custom Hostnames ──
   let hostnameStats = { created: 0, skipped: 0, updated: 0, errors: 0 };
 
@@ -377,14 +420,16 @@ async function processZone(zoneName, tokenKey, fqdns) {
   }
 
   for (const f of fqdns) {
-    const { fqdn, origin } = f;
-    console.log(`\n  [Custom Hostname] ${fqdn} → custom_origin: ${origin}`);
+    const { fqdn, origin, prefix } = f;
+    // 使用 zone 内的 origin CNAME 作为 custom_origin_server（CF SaaS 要求）
+    const originCname = originCnameMap[prefix] || `${ORIGIN_PREFIX}${prefix}.${zoneName}`;
+    console.log(`\n  [Custom Hostname] ${fqdn} → custom_origin: ${originCname}`);
 
     const existing = existingMap.get(fqdn);
 
     if (existing) {
-      // 检查 custom_origin_server 是否匹配
-      if (existing.custom_origin_server === origin && existing.status === 'active') {
+      // 检查 custom_origin_server 是否匹配（现在用 zone 内 CNAME 而非 pages.dev）
+      if (existing.custom_origin_server === originCname && existing.status === 'active') {
         console.log(`    Custom Hostname 已存在且 origin 匹配 (active) → 跳过`);
         hostnameStats.skipped++;
         continue;
@@ -392,7 +437,7 @@ async function processZone(zoneName, tokenKey, fqdns) {
 
       // origin 不匹配或状态不 active，需要更新
       // CF API 不支持直接更新 Custom Hostname 的 custom_origin_server，需要删除重建
-      if (existing.custom_origin_server !== origin) {
+      if (existing.custom_origin_server !== originCname) {
         console.log(`    Custom Hostname origin 不匹配 (当前: ${existing.custom_origin_server || '(无)'}) → 重建`);
         if (!dryRun) {
           try {
@@ -423,11 +468,11 @@ async function processZone(zoneName, tokenKey, fqdns) {
       }
     }
 
-    // 创建新的 Custom Hostname
-    console.log(`    创建 Custom Hostname (custom_origin: ${origin})`);
+    // 创建新的 Custom Hostname（使用 zone 内 origin CNAME）
+    console.log(`    创建 Custom Hostname (custom_origin: ${originCname})`);
     if (!dryRun) {
       try {
-        const ch = await createCustomHostname(zoneId, fqdn, origin, tokenKey);
+        const ch = await createCustomHostname(zoneId, fqdn, originCname, tokenKey);
         console.log(`    ✓ 已创建 (id: ${ch.id}, status: ${ch.status})`);
 
         if (ch.status !== 'active') {
@@ -494,10 +539,11 @@ async function main() {
   console.log('┌──────────────────────────────────────────────────────────────────┐');
   console.log('│  Custom Hostname 配置计划                                        │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
-  console.log('│  FQDN                              →  custom_origin              │');
+  console.log('│  FQDN                              →  origin CNAME → Pages       │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
   for (const f of fqdnList) {
-    console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.origin.padEnd(28)} │`);
+    const originCname = `${ORIGIN_PREFIX}${f.prefix}.${f.zoneName}`;
+    console.log(`│  ${f.fqdn.padEnd(34)} →  ${originCname.padEnd(22)} → ${f.origin.padEnd(18)} │`);
   }
   console.log('└──────────────────────────────────────────────────────────────────┘');
 
