@@ -345,7 +345,8 @@ function dnsResolve4FromServer(domain, server, timeout) {
 }
 
 // 交叉收集用的公共 DNS 服务器（不同递归解析器会返回不同的轮询 IP）
-const POOL_DNS_SERVERS = ['1.1.1.1', '8.8.8.8', '223.5.5.5'];
+// 以国内 DNS 为主，收集 Cloudflare CDN 节点 IP；海外 DNS 延迟高且可能被污染
+const POOL_DNS_SERVERS = ['223.5.5.5', '114.114.114.114', '117.50.11.11', '8.8.8.8'];
 
 /**
  * 解析域名并返回所有 A 记录 IP（多解析器 × 多轮收集去重）
@@ -356,14 +357,12 @@ const POOL_DNS_SERVERS = ['1.1.1.1', '8.8.8.8', '223.5.5.5'];
  */
 async function resolveIps(domain) {
   const ips = new Set();
-  // ── 主路径：系统解析器 + 多个公共 DNS 服务器 × 多轮解析收集 ──
-  const servers = ['', ...POOL_DNS_SERVERS]; // '' = 系统默认解析器
+  // ── 主路径：多个公共 DNS 服务器 × 多轮解析收集 ──
+  const servers = POOL_DNS_SERVERS;
   for (const server of servers) {
     for (let round = 0; round < POOL_RESOLVE_ROUNDS; round++) {
       try {
-        const addrs = server
-          ? await dnsResolve4FromServer(domain, server, POOL_CHECK_TIMEOUT)
-          : await dnsResolve4(domain, POOL_CHECK_TIMEOUT);
+        const addrs = await dnsResolve4FromServer(domain, server, POOL_CHECK_TIMEOUT);
         for (const a of addrs) ips.add(a);
       } catch (_) {
         // 该轮失败，继续下一轮
