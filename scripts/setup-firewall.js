@@ -14,6 +14,7 @@
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 账户1 Token（需 Zone WAF:Edit 权限）
  *   CLOUDFLARE_API_TOKEN_2 — 账户2 Token
+ *   TOKEN_KEY（可选）       — 只处理指定 tokenKey 的 zone（'default' 或 'account2'），不设则全部处理
  *   DRY_RUN（可选）        — 设为 1 则只预览不执行
  *   ZONE_CONFIG_JSON（可选）— 覆盖 wrangler.toml 配置
  *
@@ -395,9 +396,22 @@ async function main() {
 
   // Step 1: 解析配置
   console.log('\n── 解析 Firewall 配置 ──');
-  const zoneRules = buildFirewallConfig();
+  let zoneRules = buildFirewallConfig();
   if (zoneRules.length === 0) {
     console.log('  无需配置 Firewall 规则（所有 group 均为 cities:ALL 且无 schedule）');
+    return;
+  }
+
+  // 按 TOKEN_KEY 过滤（CI 多账户 Job 隔离）
+  const filterTokenKey = process.env.TOKEN_KEY;
+  if (filterTokenKey) {
+    const before = zoneRules.length;
+    zoneRules = zoneRules.filter(zr => zr.tokenKey === filterTokenKey);
+    console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${zoneRules.length} 个 Zone`);
+  }
+
+  if (zoneRules.length === 0) {
+    console.log('  过滤后无需处理任何 Zone');
     return;
   }
   console.log(`  共 ${zoneRules.length} 个 Zone 需配置 Firewall 规则\n`);

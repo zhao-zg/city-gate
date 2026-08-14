@@ -14,6 +14,7 @@
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 账户1 Token（需 Zone:Edit + DNS:Edit + SSL and Certificates:Edit 权限）
  *   CLOUDFLARE_API_TOKEN_2 — 账户2 Token
+ *   TOKEN_KEY（可选）       — 只处理指定 tokenKey 的 zone（'default' 或 'account2'），不设则全部处理
  *   DRY_RUN（可选）        — 设为 1 则只预览不执行
  *   ZONE_CONFIG_JSON（可选）— 覆盖 wrangler.toml 配置
  *
@@ -465,9 +466,22 @@ async function main() {
 
   // Step 1: 解析配置
   console.log('\n── 解析域名配置 ──');
-  const fqdnList = buildFqdnOriginMap();
+  let fqdnList = buildFqdnOriginMap();
   if (fqdnList.length === 0) {
     throw new Error('未检测到任何 FQDN 配置，请检查 workers/ 下的 wrangler.toml');
+  }
+
+  // 按 TOKEN_KEY 过滤（CI 多账户 Job 隔离）
+  const filterTokenKey = process.env.TOKEN_KEY;
+  if (filterTokenKey) {
+    const before = fqdnList.length;
+    fqdnList = fqdnList.filter(f => f.tokenKey === filterTokenKey);
+    console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${fqdnList.length} 个 FQDN`);
+  }
+
+  if (fqdnList.length === 0) {
+    console.log('  过滤后无需处理任何 FQDN');
+    return;
   }
   console.log(`  共 ${fqdnList.length} 个 FQDN 需配置\n`);
 
