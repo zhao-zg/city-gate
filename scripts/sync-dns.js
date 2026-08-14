@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /**
- * Cloudflare DNS CNAME 同步脚本（SaaS origin CNAME 模式）
+ * Cloudflare DNS 同步脚本（SaaS A 记录模式）
  *
  * 架构：
- *   用户域名 → CNAME → o-{prefix}.{zone} (proxied=true)
- *   CF Edge 处理 SaaS Custom Hostname 路由 → origin CNAME → Pages 源站
- *   非 Pages 源站直接 CNAME → 源站域名 (proxied=false)
+ *   Pages 源站 → A 记录 192.0.2.1 (proxied=true)
+ *     CF Edge 收到请求后通过 SaaS Custom Hostname 路由到 origin CNAME → Pages 源站
+ *     注意：不能用 CNAME 指向同 zone 内的 o-{prefix}.{zone}（都 proxied=true 会触发 1014）
+ *     A 记录 192.0.2.1 (RFC 5737 保留 IP) 与 Fallback Origin 使用相同占位 IP
+ *
+ *   非 Pages 源站 → CNAME → 源站域名 (proxied=false)
+ *     直连外部源站，不经过 CF 代理
  *
  * 与 setup-saas.js 的关系：
  *   setup-saas.js: SaaS 配置（Custom Hostnames + origin CNAME + Fallback Origin + Pages 自定义域名）
- *   sync-dns.js:   用户域名 DNS 记录同步（CNAME → origin CNAME 或直连源站）
+ *   sync-dns.js:   用户域名 DNS 记录同步（A 记录占位 或 CNAME 直连）
  *
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 默认 CF API Token（需 Zone:DNS:Edit 权限）
@@ -25,7 +29,7 @@
 const sc = require('./sync-cname');
 const saas = require('./setup-saas');
 
-const ORIGIN_PREFIX = 'o-'; // 与 setup-saas.js 一致
+const PLACEHOLDER_IP = '192.0.2.1'; // RFC 5737 保留 IP，与 Fallback Origin 一致
 
 // ── 工具函数 ──────────────────────────────────────────
 
@@ -39,25 +43,30 @@ function isPagesOrigin(origin) {
 // ── 分配计划构建 ─────────────────────────────────────
 
 /**
- * 从 FQDN 列表构建 CNAME 分配计划
+ * 从 FQDN 列表构建 DNS 分配计划
  *
- * Pages 源站 → CNAME → o-{prefix}.{zone} (proxied=true)
+ * Pages 源站 → A 记录 192.0.2.1 (proxied=true)
+ *   CF Edge 通过 SaaS Custom Hostname 路由到 origin CNAME → Pages 源站
+ *   不使用 CNAME → o-{prefix}.{zone}，避免同 zone proxied CNAME 链触发 1014
+ *
  * 非 Pages  → CNAME → 源站域名 (proxied=false)
+ *   直连外部源站，不经过 CF 代理
  *
  * @param {Array} fqdnList — buildFqdnOriginMap() 的返回值
- * @returns {Array} [{ fqdn, zoneName, tokenKey, target, proxied, origin, isPages }]
+ * @returns {Array} [{ fqdn, zoneName, tokenKey, recordType, target, proxied, origin, isPages }]
  */
 function buildAssignmentList(fqdnList) {
   return fqdnList.map(f => {
     const pages = isPagesOrigin(f.origin);
     if (pages) {
-      // Pages 源站: CNAME → o-{prefix}.{zone} (proxied=true)
-      // CF Edge 处理 SaaS Custom Hostname 路由，回源到 Pages
+      // Pages 源站: A 记录 → 192.0.2.1 (proxied=true)
+      // CF Edge 通过 SaaS Custom Hostname 路由，DNS 只需让流量到达 CF Edge
       return {
         fqdn: f.fqdn,
         zoneName: f.zoneName,
         tokenKey: f.tokenKey,
-        target: `${ORIGIN_PREFIX}${f.prefix}.${f.zoneName}`,
+        recordType: 'A',
+        target: PLACEHOLDER_IP,
         proxied: true,
         origin: f.origin,
         prefix: f.prefix,
@@ -69,6 +78,7 @@ function buildAssignmentList(fqdnList) {
         fqdn: f.fqdn,
         zoneName: f.zoneName,
         tokenKey: f.tokenKey,
+        recordType: 'CNAME',
         target: f.origin,
         proxied: false,
         origin: f.origin,
@@ -83,22 +93,22 @@ function buildAssignmentList(fqdnList) {
 
 function printAssignmentPlan(assignments) {
   console.log('\n┌──────────────────────────────────────────────────────────────────┐');
-  console.log('│  CNAME 分配计划                                                 │');
+  console.log('│  DNS 分配计划                                                    │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
-  console.log('│  FQDN                              →  CNAME 目标                │');
+  console.log('│  FQDN                              →  记录类型  目标           │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
 
   for (const a of assignments) {
     const tag = a.proxied ? 'proxied' : 'direct';
-    console.log(`│  ${a.fqdn.padEnd(34)} →  [${tag}] ${a.target.padEnd(24)} │`);
+    console.log(`│  ${a.fqdn.padEnd(34)} →  ${a.recordType} [${tag}] ${a.target.padEnd(18)} │`);
   }
   console.log('└──────────────────────────────────────────────────────────────────┘');
 
   const pages = assignments.filter(a => a.isPages);
   const nonPages = assignments.filter(a => !a.isPages);
-  console.log(`\n  Pages 源站: ${pages.length} 个 (proxied=true → o-{prefix}.{zone})`);
+  console.log(`\n  Pages 源站: ${pages.length} 个 (A 记录 ${PLACEHOLDER_IP} proxied=true → SaaS 路由)`);
   if (nonPages.length > 0) {
-    console.log(`  非 Pages:  ${nonPages.length} 个 (proxied=false → 直连源站)`);
+    console.log(`  非 Pages:  ${nonPages.length} 个 (CNAME proxied=false → 直连源站)`);
     for (const a of nonPages) {
       console.log(`    ${a.fqdn} → ${a.target}`);
     }
@@ -108,10 +118,22 @@ function printAssignmentPlan(assignments) {
 // ── DNS 同步主逻辑 ──────────────────────────────────
 
 /**
- * 同步 DNS 记录：为每个 FQDN 创建/更新 CNAME 记录
- * - 删除所有非 CNAME 记录（A、AAAA 等旧记录）
- * - 删除不匹配的 CNAME 记录
- * - 创建缺失的 CNAME 记录
+ * 创建 A 记录
+ */
+async function createARecord(zoneId, name, content, tokenKey) {
+  const body = { type: 'A', name, content, proxied: true, ttl: 1 };
+  await sc.cfFetch(`/zones/${zoneId}/dns_records`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    tokenKey,
+  });
+}
+
+/**
+ * 同步 DNS 记录
+ * - Pages 源站: 创建/更新 A 记录 → 192.0.2.1 (proxied=true)
+ * - 非 Pages:   创建/更新 CNAME → 源站域名 (proxied=false)
+ * - 删除所有不匹配的旧记录（A、AAAA、CNAME 等）
  */
 async function syncDnsRecords(assignments) {
   const dryRun = process.env.DRY_RUN === '1';
@@ -141,45 +163,48 @@ async function syncDnsRecords(assignments) {
     }
 
     for (const a of group.items) {
-      const { fqdn, target, proxied } = a;
-      console.log(`\n  ▸ ${fqdn} → CNAME ${target} (proxied=${proxied})`);
+      const { fqdn, target, proxied, recordType } = a;
+      console.log(`\n  ▸ ${fqdn} → ${recordType} ${target} (proxied=${proxied})`);
 
       try {
         const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey);
-        const cnameRecords = records.filter(r => r.type === 'CNAME');
-        const otherRecords = records.filter(r => r.type !== 'CNAME');
 
-        // 删除非 CNAME 记录（旧 A 记录、AAAA 等）
-        // DNS 规范不允许 CNAME 和其他记录类型共存
-        for (const rec of otherRecords) {
-          console.log(`    删除 ${rec.type} 记录 → ${rec.content} (id: ${rec.id})`);
-          if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey);
-          totalStats.deleted++;
-        }
+        // 期望的记录类型和内容
+        // Pages: A 记录，content=192.0.2.1，proxied=true
+        // 非 Pages: CNAME 记录，content=源站域名，proxied=false
+        const desiredType = recordType; // 'A' 或 'CNAME'
+        const desiredContent = target;
+        const desiredProxied = proxied;
 
-        // 检查 CNAME 是否匹配（content + proxied 都要匹配）
-        const matched = cnameRecords.filter(r => r.content === target && r.proxied === proxied);
-        const mismatched = cnameRecords.filter(r => r.content !== target || r.proxied !== proxied);
+        // 匹配的记录（类型 + content + proxied 都匹配）
+        const matched = records.filter(r => r.type === desiredType && r.content === desiredContent && r.proxied === desiredProxied);
+        // 不匹配的记录（需要删除）
+        const mismatched = records.filter(r => !(r.type === desiredType && r.content === desiredContent && r.proxied === desiredProxied));
 
         if (matched.length > 0 && mismatched.length === 0) {
-          console.log(`    CNAME 已匹配 → 跳过`);
+          console.log(`    ${desiredType} 记录已匹配 → 跳过`);
           totalStats.skipped++;
         } else {
-          // 删除不匹配的 CNAME 记录
+          // 删除不匹配的记录
           for (const rec of mismatched) {
-            console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied}) (id: ${rec.id})`);
+            console.log(`    删除 ${rec.type} 记录 → ${rec.content} (proxied=${rec.proxied}) (id: ${rec.id})`);
             if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey);
             totalStats.deleted++;
           }
 
-          // 创建新 CNAME（如果没有匹配的）
+          // 创建期望的记录（如果没有匹配的）
           if (matched.length === 0) {
-            console.log(`    创建 CNAME → ${target} (proxied=${proxied})`);
-            if (!dryRun) await sc.createCnameRecord(zoneId, fqdn, target, tokenKey, proxied);
+            console.log(`    创建 ${desiredType} 记录 → ${desiredContent} (proxied=${desiredProxied})`);
+            if (!dryRun) {
+              if (desiredType === 'A') {
+                await createARecord(zoneId, fqdn, desiredContent, tokenKey);
+              } else {
+                await sc.createCnameRecord(zoneId, fqdn, desiredContent, tokenKey, desiredProxied);
+              }
+            }
             totalStats.created++;
           } else {
-            // 有匹配的，只是多余的需要删除
-            console.log(`    CNAME 已匹配 → 跳过`);
+            console.log(`    ${desiredType} 记录已匹配 → 跳过`);
             totalStats.skipped++;
           }
         }
@@ -197,7 +222,7 @@ async function syncDnsRecords(assignments) {
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  Cloudflare DNS CNAME 同步（SaaS origin 模式）  ║');
+  console.log('║  Cloudflare DNS 同步（SaaS A 记录模式）         ║');
   console.log('╚════════════════════════════════════════════════╝');
 
   if (process.env.DRY_RUN === '1') {
@@ -254,5 +279,5 @@ module.exports = {
   isPagesOrigin,
   buildAssignmentList,
   syncDnsRecords,
-  ORIGIN_PREFIX,
+  PLACEHOLDER_IP,
 };
