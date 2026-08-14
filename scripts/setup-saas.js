@@ -181,6 +181,22 @@ function extractPagesDomain(origin) {
   return null;
 }
 
+// 缓存：tokenKey → accountId
+const accountIdCache = {};
+
+/**
+ * 获取账户 ID（带缓存）
+ */
+async function getAccountId(tokenKey) {
+  if (accountIdCache[tokenKey]) return accountIdCache[tokenKey];
+  const json = await cfApi(`/accounts`, { tokenKey });
+  if (json.result && json.result.length > 0) {
+    accountIdCache[tokenKey] = json.result[0].id;
+    return accountIdCache[tokenKey];
+  }
+  return null;
+}
+
 // 缓存：tokenKey → { accountId, projects: Map<pagesDevDomain, projectName> }
 const pagesProjectCache = {};
 
@@ -199,15 +215,7 @@ async function loadPagesProjects(tokenKey) {
   if (!token) return null;
 
   // 获取 account ID
-  let accountId;
-  try {
-    const json = await cfApi(`/accounts`, { tokenKey });
-    if (json.result && json.result.length > 0) {
-      accountId = json.result[0].id;
-    }
-  } catch {
-    return null;
-  }
+  const accountId = await getAccountId(tokenKey);
   if (!accountId) return null;
 
   // 列出所有 Pages 项目
@@ -233,6 +241,35 @@ async function loadPagesProjects(tokenKey) {
 }
 
 /**
+ * 查找 Pages 项目信息（优先使用显式 pages_project 配置）
+ *
+ * 优先路径：wrangler.toml 中 group 配置了 pages_project 字段
+ *   → 直接用 tokenKey + projectName 查询账户 ID，无需全量列表
+ *   → 同名项目在两个账户都存在时，用 tokenKey 区分（city-gate→default, city-gate-2→account2）
+ *
+ * 回退路径：未配置 pages_project
+ *   → 通过 origin 的 *.pages.dev 域名全量列表反查（旧逻辑，保留兼容）
+ *
+ * 返回 { accountId, tokenKey, projectName } 或 null
+ */
+async function findPagesProject(origin, tokenKey, pagesProject) {
+  // 优先路径：显式 pages_project
+  if (pagesProject) {
+    try {
+      const accountId = await getAccountId(tokenKey);
+      if (accountId) {
+        return { accountId, tokenKey, projectName: pagesProject };
+      }
+    } catch (e) {
+      console.log(`    ⚠ 显式 pages_project="${pagesProject}" 获取账户 ID 失败 (tokenKey=${tokenKey}): ${e.message}`);
+    }
+  }
+
+  // 回退路径：通过 origin 全量反查
+  return findPagesProjectByOrigin(origin);
+}
+
+/**
  * 通过 origin 的 *.pages.dev 域名查找 Pages 项目所在账户
  * 返回 { accountId, tokenKey, projectName } 或 null
  */
@@ -241,13 +278,13 @@ async function findPagesProjectByOrigin(origin) {
   if (!pagesDomain) return null;
 
   const tokenKeys = ['default', 'account2'];
-  for (const tokenKey of tokenKeys) {
-    const loaded = await loadPagesProjects(tokenKey);
+  for (const tk of tokenKeys) {
+    const loaded = await loadPagesProjects(tk);
     if (!loaded) continue;
 
     const projectName = loaded.projectMap.get(pagesDomain);
     if (projectName) {
-      return { accountId: loaded.accountId, tokenKey, projectName };
+      return { accountId: loaded.accountId, tokenKey: tk, projectName };
     }
   }
   return null;
@@ -271,7 +308,8 @@ async function addPagesDomain(accountId, projectName, domain, tokenKey) {
 
 /**
  * 从 ZONE_MAP 和 wrangler.toml 提取每条 FQDN → origin 映射
- * 返回 [{ fqdn, zoneName, tokenKey, origin, prefix }]
+ * 返回 [{ fqdn, zoneName, tokenKey, origin, prefix, pagesProject }]
+ * pagesProject 为可选字段，来自 wrangler.toml 中 group 的 pages_project 配置
  */
 function buildFqdnOriginMap() {
   // 复用 autoDetectZoneMap 获取 zone + prefix 列表
@@ -303,8 +341,8 @@ function buildFqdnOriginMap() {
     }
   }
 
-  // 构建 prefix → origin 映射（按 tokenKey 分组，因为账户2有不同的 origin）
-  const prefixOriginByTokenKey = {}; // { default: { sg: 'https://...', ... }, account2: { ... } }
+  // 构建 prefix → { origin, pagesProject } 映射（按 tokenKey 分组，因为账户2有不同的 origin）
+  const prefixInfoByTokenKey = {}; // { default: { sg: { origin, pagesProject }, ... }, account2: { ... } }
 
   for (const entry of allConfigs) {
     // 环境变量方式：entry 直接是 config 对象，需要从 zones 找 tokenKey
@@ -322,12 +360,15 @@ function buildFqdnOriginMap() {
       }
     }
 
-    if (!prefixOriginByTokenKey[tokenKey]) {
-      prefixOriginByTokenKey[tokenKey] = {};
+    if (!prefixInfoByTokenKey[tokenKey]) {
+      prefixInfoByTokenKey[tokenKey] = {};
     }
     if (config.groups) {
       for (const group of config.groups) {
-        prefixOriginByTokenKey[tokenKey][group.prefix] = sc.stripProtocol(group.origin || '');
+        prefixInfoByTokenKey[tokenKey][group.prefix] = {
+          origin: sc.stripProtocol(group.origin || ''),
+          pagesProject: group.pages_project || null,
+        };
       }
     }
   }
@@ -336,10 +377,10 @@ function buildFqdnOriginMap() {
   const fqdnList = [];
   for (const zone of zoneMap) {
     const tokenKey = zone.tokenKey || 'default';
-    const origins = prefixOriginByTokenKey[tokenKey] || {};
+    const prefixInfo = prefixInfoByTokenKey[tokenKey] || {};
     for (const prefix of zone.names) {
-      const origin = origins[prefix];
-      if (!origin) {
+      const info = prefixInfo[prefix];
+      if (!info || !info.origin) {
         console.log(`  ⚠ ${prefix}.${zone.zoneName} 无对应 origin，跳过`);
         continue;
       }
@@ -347,8 +388,9 @@ function buildFqdnOriginMap() {
         fqdn: `${prefix}.${zone.zoneName}`,
         zoneName: zone.zoneName,
         tokenKey,
-        origin,
+        origin: info.origin,
         prefix,
+        pagesProject: info.pagesProject,
       });
     }
   }
@@ -488,8 +530,8 @@ async function processZone(zoneName, tokenKey, fqdns) {
   // ── Step 2c: 为 Pages 项目添加 origin CNAME 为自定义域名 ──
   // CF SaaS 回源时 Host header 是 o-{prefix}.{zone}，Pages 项目需要识别该域名
   // 仅对 *.pages.dev 源站操作，非 Pages 源站（如 answer.07170501.xyz）跳过
-  // Pages 项目名可能与 *.pages.dev 域名不同（如项目名 "sg" → 域名 sg-7gj.pages.dev）
-  // 因此通过 origin 的 *.pages.dev 域名反查项目名和所在账户
+  // 优先使用 wrangler.toml 中显式配置的 pages_project 字段直接定位项目，
+  // 未配置时回退到通过 origin 的 *.pages.dev 域名全量反查
   console.log(`\n  [Pages Domains] 为 Pages 项目添加 origin CNAME 为自定义域名`);
   {
     const seenOrigins = new Set(); // 同一 origin 只需配置一次
@@ -511,10 +553,10 @@ async function processZone(zoneName, tokenKey, fqdns) {
         continue;
       }
 
-      // 通过 origin 域名查找 Pages 项目所在账户和项目名
+      // 优先使用显式 pages_project 查找，回退到 origin 反查
       let pagesInfo;
       try {
-        pagesInfo = await findPagesProjectByOrigin(f.origin);
+        pagesInfo = await findPagesProject(f.origin, f.tokenKey, f.pagesProject);
       } catch (e) {
         console.error(`      ✗ 查找 Pages 项目失败: ${e.message}`);
         continue;
@@ -760,6 +802,7 @@ module.exports = {
   waitForFallbackOriginActive,
   waitForCustomHostnameActive,
   extractPagesDomain,
+  findPagesProject,
   findPagesProjectByOrigin,
   listPagesDomains,
   addPagesDomain,
