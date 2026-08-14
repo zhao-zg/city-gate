@@ -181,9 +181,42 @@ function extractPagesProjectName(origin) {
   return null;
 }
 
-async function getZoneAccountId(zoneId, tokenKey) {
-  const json = await cfApi(`/zones/${zoneId}`, { tokenKey });
-  return json.result?.account?.id || null;
+/**
+ * 尝试用所有可用 Token 查找 Pages 项目，返回 { accountId, tokenKey } 或 null
+ */
+async function findPagesProjectAccount(projectName) {
+  const tokenKeys = ['default', 'account2'];
+  for (const tokenKey of tokenKeys) {
+    let token;
+    try {
+      token = sc.getToken(tokenKey);
+    } catch {
+      continue; // Token 未设置
+    }
+    if (!token) continue;
+
+    // 先获取该 Token 对应的 account ID
+    let accountId;
+    try {
+      const json = await cfApi(`/accounts`, { tokenKey });
+      if (json.result && json.result.length > 0) {
+        accountId = json.result[0].id;
+      }
+    } catch {
+      continue;
+    }
+    if (!accountId) continue;
+
+    // 验证 Pages 项目是否在该账户下
+    try {
+      await cfApi(`/accounts/${accountId}/pages/projects/${projectName}`, { tokenKey });
+      return { accountId, tokenKey };
+    } catch {
+      // 项目不在该账户下或 Token 无权限，继续尝试下一个
+      continue;
+    }
+  }
+  return null;
 }
 
 async function listPagesDomains(accountId, projectName, tokenKey) {
@@ -421,19 +454,10 @@ async function processZone(zoneName, tokenKey, fqdns) {
   // ── Step 2c: 为 Pages 项目添加 origin CNAME 为自定义域名 ──
   // CF SaaS 回源时 Host header 是 o-{prefix}.{zone}，Pages 项目需要识别该域名
   // 仅对 *.pages.dev 源站操作，非 Pages 源站（如 answer.07170501.xyz）跳过
+  // Pages 项目可能跨账户，自动尝试所有可用 Token 查找项目所在账户
   console.log(`\n  [Pages Domains] 为 Pages 项目添加 origin CNAME 为自定义域名`);
-  let pagesAccountId = null;
-  try {
-    pagesAccountId = await getZoneAccountId(zoneId, tokenKey);
-    if (!pagesAccountId) {
-      console.log(`    ⚠ 无法获取 Zone 的 Account ID，跳过 Pages 域名配置`);
-    }
-  } catch (e) {
-    console.error(`    ✗ 获取 Account ID 失败: ${e.message}`);
-  }
-
-  if (pagesAccountId) {
-    const seenPagesProjects = new Set(); // 同一 Pages 项目只需配置一次
+  {
+    const seenPagesProjects = new Set(); // 同一 Pages 项目只需配置一次（按 origin 去重）
     for (const f of fqdns) {
       if (seenPagesProjects.has(f.origin)) continue;
       seenPagesProjects.add(f.origin);
@@ -446,22 +470,37 @@ async function processZone(zoneName, tokenKey, fqdns) {
 
       const originCname = originCnameMap[f.prefix] || `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
       console.log(`\n    [Pages] ${projectName} ← ${originCname}`);
+
+      if (dryRun) {
+        console.log(`      [DRY_RUN] 跳过实际添加`);
+        continue;
+      }
+
+      // 查找 Pages 项目所在账户（可能跨账户）
+      let pagesAccount;
       try {
-        if (!dryRun) {
-          const domains = await listPagesDomains(pagesAccountId, projectName, tokenKey);
-          const exists = domains.some(d => d.name === originCname);
-          if (exists) {
-            console.log(`      域名已存在 → 跳过`);
-          } else {
-            console.log(`      添加自定义域名 ${originCname}...`);
-            await addPagesDomain(pagesAccountId, projectName, originCname, tokenKey);
-            console.log(`      ✓ 已添加`);
-          }
+        pagesAccount = await findPagesProjectAccount(projectName);
+      } catch (e) {
+        console.error(`      ✗ 查找 Pages 项目失败: ${e.message}`);
+        continue;
+      }
+
+      if (!pagesAccount) {
+        console.error(`      ✗ 未找到 Pages 项目 "${projectName}"（可能在无权限的账户下）`);
+        continue;
+      }
+
+      try {
+        const domains = await listPagesDomains(pagesAccount.accountId, projectName, pagesAccount.tokenKey);
+        const exists = domains.some(d => d.name === originCname);
+        if (exists) {
+          console.log(`      域名已存在 → 跳过`);
         } else {
-          console.log(`      [DRY_RUN] 跳过实际添加`);
+          console.log(`      添加自定义域名 ${originCname}... (account: ${pagesAccount.tokenKey})`);
+          await addPagesDomain(pagesAccount.accountId, projectName, originCname, pagesAccount.tokenKey);
+          console.log(`      ✓ 已添加`);
         }
       } catch (e) {
-        // 域名可能已存在，API 报错时检查错误信息
         if (e.message.includes('already') || e.message.includes('已存在') || e.message.includes('duplicate')) {
           console.log(`      域名已存在 → 跳过`);
         } else {
@@ -684,7 +723,7 @@ module.exports = {
   waitForFallbackOriginActive,
   waitForCustomHostnameActive,
   extractPagesProjectName,
-  getZoneAccountId,
+  findPagesProjectAccount,
   listPagesDomains,
   addPagesDomain,
 };

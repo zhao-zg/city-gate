@@ -87,6 +87,7 @@ jobs:
       - name: 配置 CF for SaaS（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           TOKEN_KEY: default
         run: node scripts/setup-saas.js
 
@@ -118,7 +119,7 @@ jobs:
       - name: 配置 CF for SaaS（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           TOKEN_KEY: account2
         run: node scripts/setup-saas.js
