@@ -5,8 +5,10 @@
  * 自动化配置 CF for SaaS：
  *   1. 为每个 zone 创建 Fallback Origin DNS 记录（proxy-fallback.{zone} → A 192.0.2.1, proxied=true）
  *   2. 设置 Fallback Origin
- *   3. 为每个 FQDN 创建 Custom Hostname（指定 custom_origin 指向 *.pages.dev 源站）
- *   4. 等待 Custom Hostname 状态 Active
+ *   3. 为每个 FQDN 创建 zone 内 origin CNAME（o-{prefix}.{zone} → *.pages.dev）
+ *   4. 为每个 Pages 项目添加 origin CNAME 为自定义域名
+ *   5. 为每个 FQDN 创建 Custom Hostname（指定 custom_origin 指向 zone 内 CNAME）
+ *   6. 等待 Custom Hostname 状态 Active
  *
  * 配置来源：workers/ 下的 wrangler.toml 中的 DOMAIN_CONFIG_JSON
  *   与 sync-cname.js / sync-dns.js 共用同一解析逻辑
@@ -163,6 +165,39 @@ async function waitForCustomHostnameActive(zoneId, hostname, tokenKey) {
     await sleep(CH_POLL_INTERVAL_MS);
   }
   return null;
+}
+
+// ── Pages 自定义域名 ─────────────────────────────────
+
+/**
+ * 从 origin（如 https://sg-f3b.pages.dev）提取 Pages 项目名（sg-f3b）
+ * 非 Pages 源站返回 null
+ */
+function extractPagesProjectName(origin) {
+  const host = sc.stripProtocol(origin);
+  if (host.endsWith('.pages.dev')) {
+    return host.slice(0, -'.pages.dev'.length);
+  }
+  return null;
+}
+
+async function getZoneAccountId(zoneId, tokenKey) {
+  const json = await cfApi(`/zones/${zoneId}`, { tokenKey });
+  return json.result?.account?.id || null;
+}
+
+async function listPagesDomains(accountId, projectName, tokenKey) {
+  const json = await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains`, { tokenKey });
+  return json.result || [];
+}
+
+async function addPagesDomain(accountId, projectName, domain, tokenKey) {
+  const json = await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains`, {
+    method: 'POST',
+    body: JSON.stringify({ name: domain }),
+    tokenKey,
+  });
+  return json.result;
 }
 
 // ── 配置解析 ─────────────────────────────────────────
@@ -383,6 +418,59 @@ async function processZone(zoneName, tokenKey, fqdns) {
     }
   }
 
+  // ── Step 2c: 为 Pages 项目添加 origin CNAME 为自定义域名 ──
+  // CF SaaS 回源时 Host header 是 o-{prefix}.{zone}，Pages 项目需要识别该域名
+  // 仅对 *.pages.dev 源站操作，非 Pages 源站（如 answer.07170501.xyz）跳过
+  console.log(`\n  [Pages Domains] 为 Pages 项目添加 origin CNAME 为自定义域名`);
+  let pagesAccountId = null;
+  try {
+    pagesAccountId = await getZoneAccountId(zoneId, tokenKey);
+    if (!pagesAccountId) {
+      console.log(`    ⚠ 无法获取 Zone 的 Account ID，跳过 Pages 域名配置`);
+    }
+  } catch (e) {
+    console.error(`    ✗ 获取 Account ID 失败: ${e.message}`);
+  }
+
+  if (pagesAccountId) {
+    const seenPagesProjects = new Set(); // 同一 Pages 项目只需配置一次
+    for (const f of fqdns) {
+      if (seenPagesProjects.has(f.origin)) continue;
+      seenPagesProjects.add(f.origin);
+
+      const projectName = extractPagesProjectName(f.origin);
+      if (!projectName) {
+        console.log(`    ${f.origin} 非 Pages 源站 → 跳过`);
+        continue;
+      }
+
+      const originCname = originCnameMap[f.prefix] || `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
+      console.log(`\n    [Pages] ${projectName} ← ${originCname}`);
+      try {
+        if (!dryRun) {
+          const domains = await listPagesDomains(pagesAccountId, projectName, tokenKey);
+          const exists = domains.some(d => d.name === originCname);
+          if (exists) {
+            console.log(`      域名已存在 → 跳过`);
+          } else {
+            console.log(`      添加自定义域名 ${originCname}...`);
+            await addPagesDomain(pagesAccountId, projectName, originCname, tokenKey);
+            console.log(`      ✓ 已添加`);
+          }
+        } else {
+          console.log(`      [DRY_RUN] 跳过实际添加`);
+        }
+      } catch (e) {
+        // 域名可能已存在，API 报错时检查错误信息
+        if (e.message.includes('already') || e.message.includes('已存在') || e.message.includes('duplicate')) {
+          console.log(`      域名已存在 → 跳过`);
+        } else {
+          console.error(`      ✗ 添加失败: ${e.message}`);
+        }
+      }
+    }
+  }
+
   // ── Step 3: Custom Hostnames ──
   let hostnameStats = { created: 0, skipped: 0, updated: 0, errors: 0 };
 
@@ -595,4 +683,8 @@ module.exports = {
   setFallbackOrigin,
   waitForFallbackOriginActive,
   waitForCustomHostnameActive,
+  extractPagesProjectName,
+  getZoneAccountId,
+  listPagesDomains,
+  addPagesDomain,
 };
