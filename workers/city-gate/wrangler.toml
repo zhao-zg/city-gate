@@ -17,7 +17,8 @@ id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 #   { "name": "zzg.cc.cd", "noPreferred": true }  → 不使用优选域名，
 #     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
 #     各前缀对应的源站 origin，不分配优选域名池
-#
+#      "cities": ["杭州", "Hangzhou"],
+#      "provinces": ["浙江", "Zhejiang"],
 # 不优选域名{ "name": "zhaozg.dpdns.org", "noPreferred": true },
 [vars]
 DOMAIN_CONFIG_JSON = """
@@ -39,8 +40,6 @@ DOMAIN_CONFIG_JSON = """
       "prefix": "books",
       "origin": "https://books-em3.pages.dev",
       "cities": ["ALL"],
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"],
       "schedule": {
         "days": [1, 2, 3, 4, 5, 6, 7],
         "periods": ["01:00-22:00"]
@@ -48,9 +47,7 @@ DOMAIN_CONFIG_JSON = """
     },
     {
       "prefix": "bible",
-      "origin": "https://bible-bka.pages.dev",
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"]
+      "origin": "https://bible-bka.pages.dev"
     },
     {
       "prefix": "cx",
