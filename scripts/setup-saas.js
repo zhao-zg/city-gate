@@ -170,50 +170,84 @@ async function waitForCustomHostnameActive(zoneId, hostname, tokenKey) {
 // ── Pages 自定义域名 ─────────────────────────────────
 
 /**
- * 从 origin（如 https://sg-f3b.pages.dev）提取 Pages 项目名（sg-f3b）
+ * 从 origin（如 https://sg-f3b.pages.dev）提取 *.pages.dev 域名（sg-f3b.pages.dev）
  * 非 Pages 源站返回 null
  */
-function extractPagesProjectName(origin) {
+function extractPagesDomain(origin) {
   const host = sc.stripProtocol(origin);
   if (host.endsWith('.pages.dev')) {
-    return host.slice(0, -'.pages.dev'.length);
+    return host;
   }
   return null;
 }
 
+// 缓存：tokenKey → { accountId, projects: Map<pagesDevDomain, projectName> }
+const pagesProjectCache = {};
+
 /**
- * 尝试用所有可用 Token 查找 Pages 项目，返回 { accountId, tokenKey } 或 null
+ * 列出账户下所有 Pages 项目，构建 { pagesDevDomain → projectName } 映射
  */
-async function findPagesProjectAccount(projectName) {
+async function loadPagesProjects(tokenKey) {
+  if (pagesProjectCache[tokenKey]) return pagesProjectCache[tokenKey];
+
+  let token;
+  try {
+    token = sc.getToken(tokenKey);
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+
+  // 获取 account ID
+  let accountId;
+  try {
+    const json = await cfApi(`/accounts`, { tokenKey });
+    if (json.result && json.result.length > 0) {
+      accountId = json.result[0].id;
+    }
+  } catch {
+    return null;
+  }
+  if (!accountId) return null;
+
+  // 列出所有 Pages 项目
+  const projectMap = new Map(); // pagesDevDomain → projectName
+  try {
+    const json = await cfApi(`/accounts/${accountId}/pages/projects`, { tokenKey });
+    for (const proj of (json.result || [])) {
+      // 每个项目有 domains 数组，其中包含 *.pages.dev 域名
+      for (const domain of (proj.domains || [])) {
+        if (domain.endsWith('.pages.dev')) {
+          projectMap.set(domain, proj.name);
+        }
+      }
+    }
+  } catch {
+    // Token 无 Pages 读取权限
+    return null;
+  }
+
+  const result = { accountId, projectMap };
+  pagesProjectCache[tokenKey] = result;
+  return result;
+}
+
+/**
+ * 通过 origin 的 *.pages.dev 域名查找 Pages 项目所在账户
+ * 返回 { accountId, tokenKey, projectName } 或 null
+ */
+async function findPagesProjectByOrigin(origin) {
+  const pagesDomain = extractPagesDomain(origin);
+  if (!pagesDomain) return null;
+
   const tokenKeys = ['default', 'account2'];
   for (const tokenKey of tokenKeys) {
-    let token;
-    try {
-      token = sc.getToken(tokenKey);
-    } catch {
-      continue; // Token 未设置
-    }
-    if (!token) continue;
+    const loaded = await loadPagesProjects(tokenKey);
+    if (!loaded) continue;
 
-    // 先获取该 Token 对应的 account ID
-    let accountId;
-    try {
-      const json = await cfApi(`/accounts`, { tokenKey });
-      if (json.result && json.result.length > 0) {
-        accountId = json.result[0].id;
-      }
-    } catch {
-      continue;
-    }
-    if (!accountId) continue;
-
-    // 验证 Pages 项目是否在该账户下
-    try {
-      await cfApi(`/accounts/${accountId}/pages/projects/${projectName}`, { tokenKey });
-      return { accountId, tokenKey };
-    } catch {
-      // 项目不在该账户下或 Token 无权限，继续尝试下一个
-      continue;
+    const projectName = loaded.projectMap.get(pagesDomain);
+    if (projectName) {
+      return { accountId: loaded.accountId, tokenKey, projectName };
     }
   }
   return null;
@@ -454,50 +488,53 @@ async function processZone(zoneName, tokenKey, fqdns) {
   // ── Step 2c: 为 Pages 项目添加 origin CNAME 为自定义域名 ──
   // CF SaaS 回源时 Host header 是 o-{prefix}.{zone}，Pages 项目需要识别该域名
   // 仅对 *.pages.dev 源站操作，非 Pages 源站（如 answer.07170501.xyz）跳过
-  // Pages 项目可能跨账户，自动尝试所有可用 Token 查找项目所在账户
+  // Pages 项目名可能与 *.pages.dev 域名不同（如项目名 "sg" → 域名 sg-7gj.pages.dev）
+  // 因此通过 origin 的 *.pages.dev 域名反查项目名和所在账户
   console.log(`\n  [Pages Domains] 为 Pages 项目添加 origin CNAME 为自定义域名`);
   {
-    const seenPagesProjects = new Set(); // 同一 Pages 项目只需配置一次（按 origin 去重）
+    const seenOrigins = new Set(); // 同一 origin 只需配置一次
     for (const f of fqdns) {
-      if (seenPagesProjects.has(f.origin)) continue;
-      seenPagesProjects.add(f.origin);
+      if (seenOrigins.has(f.origin)) continue;
+      seenOrigins.add(f.origin);
 
-      const projectName = extractPagesProjectName(f.origin);
-      if (!projectName) {
+      const pagesDomain = extractPagesDomain(f.origin);
+      if (!pagesDomain) {
         console.log(`    ${f.origin} 非 Pages 源站 → 跳过`);
         continue;
       }
 
       const originCname = originCnameMap[f.prefix] || `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
-      console.log(`\n    [Pages] ${projectName} ← ${originCname}`);
+      console.log(`\n    [Pages] ${pagesDomain} ← ${originCname}`);
 
       if (dryRun) {
         console.log(`      [DRY_RUN] 跳过实际添加`);
         continue;
       }
 
-      // 查找 Pages 项目所在账户（可能跨账户）
-      let pagesAccount;
+      // 通过 origin 域名查找 Pages 项目所在账户和项目名
+      let pagesInfo;
       try {
-        pagesAccount = await findPagesProjectAccount(projectName);
+        pagesInfo = await findPagesProjectByOrigin(f.origin);
       } catch (e) {
         console.error(`      ✗ 查找 Pages 项目失败: ${e.message}`);
         continue;
       }
 
-      if (!pagesAccount) {
-        console.error(`      ✗ 未找到 Pages 项目 "${projectName}"（可能在无权限的账户下）`);
+      if (!pagesInfo) {
+        console.error(`      ✗ 未找到包含 ${pagesDomain} 的 Pages 项目（Token 可能缺 Pages 权限）`);
         continue;
       }
 
+      console.log(`      → 项目: ${pagesInfo.projectName} (account: ${pagesInfo.tokenKey})`);
+
       try {
-        const domains = await listPagesDomains(pagesAccount.accountId, projectName, pagesAccount.tokenKey);
+        const domains = await listPagesDomains(pagesInfo.accountId, pagesInfo.projectName, pagesInfo.tokenKey);
         const exists = domains.some(d => d.name === originCname);
         if (exists) {
           console.log(`      域名已存在 → 跳过`);
         } else {
-          console.log(`      添加自定义域名 ${originCname}... (account: ${pagesAccount.tokenKey})`);
-          await addPagesDomain(pagesAccount.accountId, projectName, originCname, pagesAccount.tokenKey);
+          console.log(`      添加自定义域名 ${originCname}...`);
+          await addPagesDomain(pagesInfo.accountId, pagesInfo.projectName, originCname, pagesInfo.tokenKey);
           console.log(`      ✓ 已添加`);
         }
       } catch (e) {
@@ -722,8 +759,8 @@ module.exports = {
   setFallbackOrigin,
   waitForFallbackOriginActive,
   waitForCustomHostnameActive,
-  extractPagesProjectName,
-  findPagesProjectAccount,
+  extractPagesDomain,
+  findPagesProjectByOrigin,
   listPagesDomains,
   addPagesDomain,
 };
