@@ -27,43 +27,79 @@ const sc = require('./sync-cname');
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
-// 省名中→英映射（CF ip.geo.subdivision 返回 ISO 3166-2 代码的 name 部分）
-// 注意：CF 实际返回的是英文省份名（如 "Zhejiang"），不是中文
-const PROVINCE_CN_TO_EN = {
-  '浙江': 'Zhejiang',
-  '江苏': 'Jiangsu',
-  '广东': 'Guangdong',
-  '北京': 'Beijing',
-  '上海': 'Shanghai',
-  '山东': 'Shandong',
-  '河南': 'Henan',
-  '河北': 'Hebei',
-  '四川': 'Sichuan',
-  '湖北': 'Hubei',
-  '湖南': 'Hunan',
-  '福建': 'Fujian',
-  '安徽': 'Anhui',
-  '江西': 'Jiangxi',
-  '辽宁': 'Liaoning',
-  '陕西': 'Shaanxi',
-  '重庆': 'Chongqing',
-  '天津': 'Tianjin',
-  '广西': 'Guangxi',
-  '黑龙江': 'Heilongjiang',
-  '吉林': 'Jilin',
-  '云南': 'Yunnan',
-  '贵州': 'Guizhou',
-  '甘肃': 'Gansu',
-  '内蒙古': 'Nei Mongol',
-  '新疆': 'Xinjiang',
-  '海南': 'Hainan',
-  '宁夏': 'Ningxia',
-  '青海': 'Qinghai',
-  '西藏': 'Xizang',
-  '山西': 'Shanxi',
-  '香港': 'Hong Kong',
-  '澳门': 'Macao',
-  '台湾': 'Taiwan',
+// 省名 → ISO 3166-2 代码映射（CF Ruleset Engine 使用 ip.src.subdivision_1_iso_code）
+// 注意：CF 返回的是 ISO 3166-2 代码（如 "CN-ZJ"），不是英文省份名
+// 参考: https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/ip.src.subdivision_1_iso_code/
+const PROVINCE_CN_TO_CODE = {
+  '浙江': 'CN-ZJ',
+  '江苏': 'CN-JS',
+  '广东': 'CN-GD',
+  '北京': 'CN-BJ',
+  '上海': 'CN-SH',
+  '山东': 'CN-SD',
+  '河南': 'CN-HA',
+  '河北': 'CN-HE',
+  '四川': 'CN-SC',
+  '湖北': 'CN-HB',
+  '湖南': 'CN-HN',
+  '福建': 'CN-FJ',
+  '安徽': 'CN-AH',
+  '江西': 'CN-JX',
+  '辽宁': 'CN-LN',
+  '陕西': 'CN-SN',
+  '重庆': 'CN-CQ',
+  '天津': 'CN-TJ',
+  '广西': 'CN-GX',
+  '黑龙江': 'CN-HL',
+  '吉林': 'CN-JL',
+  '云南': 'CN-YN',
+  '贵州': 'CN-GZ',
+  '甘肃': 'CN-GS',
+  '内蒙古': 'CN-NM',
+  '新疆': 'CN-XJ',
+  '海南': 'CN-HI',
+  '宁夏': 'CN-NX',
+  '青海': 'CN-QH',
+  '西藏': 'CN-XZ',
+  '山西': 'CN-SX',
+  '香港': 'CN-HK',
+  '澳门': 'CN-MO',
+  '台湾': 'CN-TW',
+  // 兼容英文写法（配置中可能同时包含中文和英文）
+  'Zhejiang': 'CN-ZJ',
+  'Jiangsu': 'CN-JS',
+  'Guangdong': 'CN-GD',
+  'Beijing': 'CN-BJ',
+  'Shanghai': 'CN-SH',
+  'Shandong': 'CN-SD',
+  'Henan': 'CN-HA',
+  'Hebei': 'CN-HE',
+  'Sichuan': 'CN-SC',
+  'Hubei': 'CN-HB',
+  'Hunan': 'CN-HN',
+  'Fujian': 'CN-FJ',
+  'Anhui': 'CN-AH',
+  'Jiangxi': 'CN-JX',
+  'Liaoning': 'CN-LN',
+  'Shaanxi': 'CN-SN',
+  'Chongqing': 'CN-CQ',
+  'Tianjin': 'CN-TJ',
+  'Guangxi': 'CN-GX',
+  'Heilongjiang': 'CN-HL',
+  'Jilin': 'CN-JL',
+  'Yunnan': 'CN-YN',
+  'Guizhou': 'CN-GZ',
+  'Gansu': 'CN-GS',
+  'Nei Mongol': 'CN-NM',
+  'Xinjiang': 'CN-XJ',
+  'Hainan': 'CN-HI',
+  'Ningxia': 'CN-NX',
+  'Qinghai': 'CN-QH',
+  'Xizang': 'CN-XZ',
+  'Shanxi': 'CN-SX',
+  'Hong Kong': 'CN-HK',
+  'Macao': 'CN-MO',
+  'Taiwan': 'CN-TW',
 };
 
 const dryRun = process.env.DRY_RUN === '1';
@@ -239,13 +275,13 @@ function buildFirewallConfig() {
         // ── 地理围栏规则 ──
         // cities 非 ALL 且有 provinces → 省级围栏
         if (!cities.includes('ALL') && provinces.length > 0) {
-          // 提取英文省份名（CF ip.geo.subdivision 返回英文）
+          // 提取 ISO 3166-2 代码（CF ip.src.subdivision_1_iso_code 返回如 "CN-ZJ"）
           // 配置中可能同时包含中文和英文（如 ["浙江", "Zhejiang"]），映射后去重
-          const enProvinces = [...new Set(provinces.map(p => PROVINCE_CN_TO_EN[p] || p))];
+          const isoCodes = [...new Set(provinces.map(p => PROVINCE_CN_TO_CODE[p] || p))];
 
           // 构建表达式：匹配该 hostname 且不在指定省份
-          // 多个省份用 or 连接
-          const provinceExprs = enProvinces.map(p => `ip.geo.subdivision eq "${p}"`).join(' or ');
+          // 使用 ip.src.subdivision_1_iso_code 字段（Business 计划以上可用）
+          const provinceExprs = isoCodes.map(c => `ip.src.subdivision_1_iso_code eq "${c}"`).join(' or ');
           const expression = `(http.host eq "${fqdn}") and not (${provinceExprs})`;
 
           rules.push({
@@ -253,7 +289,7 @@ function buildFirewallConfig() {
             fqdn,
             expression,
             action: 'block',
-            description: `${group.prefix}-geo-restrict (block non-${enProvinces.join('/')})`,
+            description: `${group.prefix}-geo-restrict (block non-${isoCodes.join('/')})`,
             enabled: true,
           });
         }
@@ -465,5 +501,5 @@ module.exports = {
   getCustomRuleset,
   putCustomRuleset,
   createCustomRuleset,
-  PROVINCE_CN_TO_EN,
+  PROVINCE_CN_TO_CODE,
 };
