@@ -890,6 +890,7 @@ module.exports = {
   registrableDomain,
   fetchCfTop20: fetchCfIpTop20,
   autoRefillPool,
+  buildTestHost,
   buildAssignmentPlan,
   getZoneId,
   getDnsRecords,

@@ -28,7 +28,7 @@ run_script() {
 
   case "$mode" in
     sync)
-      script="scripts/sync-cname.js"
+      script="scripts/sync-dns.js"
       ;;
     check)
       script="scripts/check-cname.js"

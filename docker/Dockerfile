@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 # ── 安装 cron + tzdata + ca-certificates ──
 RUN apk add --no-cache dcron tzdata ca-certificates && \
@@ -20,11 +20,15 @@ RUN chmod +x /entrypoint.sh
 # ── 日志目录 ──
 RUN mkdir -p /var/log/city-gate
 
-# 默认每 6 小时执行一次（与 GitHub Actions 对齐）
+# 默认每 6 小时执行一次
 ENV CRON_SCHEDULE="0 */6 * * *"
-# 默认执行同步（可选: check = 仅检测不同步）
+# 默认执行 A 记录同步（可选: check = 仅检测不同步）
 ENV RUN_MODE="sync"
 # 默认不 dry-run
 ENV DRY_RUN="0"
+# 每个 zone 分配的 A 记录 IP 数量
+ENV IP_PER_ZONE="2"
+# IP 去重前缀长度（/24 = 同段只保留延迟最低的）
+ENV IP_DEDUP_PREFIX="24"
 
 ENTRYPOINT ["/entrypoint.sh"]

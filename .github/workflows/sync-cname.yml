@@ -1,11 +1,10 @@
 name: 同步 DNS CNAME
 
 on:
-  # 每 6 小时自动检查同步（UTC 整点，北京时间 2:00/8:00/14:00/20:00）
-  # 说明：CNAME 记录配置后长期不变，同步频率只影响"池域名失效后的自愈速度"，
-  #       6 小时对 DNS 场景足够；每小时会占 GitHub Actions 免费额度一半以上（约 1000+ 分钟/月）。
-  schedule:
-    - cron: '0 */6 * * *'
+  # 定时任务已停用——DNS 同步改为国内 Docker 定时执行 sync-dns.js（A 记录模式）
+  # 海外 CI 无法检测 Cloudflare 挑战页（仅国内网络环境触发），保留 workflow_dispatch 供手动触发
+  # schedule:
+  #   - cron: '0 */6 * * *'
   # 手动触发
   workflow_dispatch:
     inputs:
