@@ -136,10 +136,10 @@ async function getCustomHostname(zoneId, hostname, tokenKey) {
 async function createCustomHostname(zoneId, hostname, customOrigin, tokenKey) {
   const body = {
     hostname,
-    ssl: { method: 'http', wildcard: false },
+    ssl: { method: 'http' },
   };
   if (customOrigin) {
-    body.custom_origin = customOrigin;
+    body.custom_origin_server = customOrigin;
   }
   const json = await cfApi(`/zones/${zoneId}/custom_hostnames`, {
     method: 'POST',
@@ -310,7 +310,13 @@ async function processZone(zoneName, tokenKey, fqdns) {
   // ── Step 2: 设置 Fallback Origin ──
   console.log(`\n  [Fallback Origin] 设置 fallback origin = ${fallbackFqdn}`);
   try {
-    const current = await getFallbackOrigin(zoneId, tokenKey);
+    let current = null;
+    try {
+      current = await getFallbackOrigin(zoneId, tokenKey);
+    } catch (e) {
+      // 首次配置时 fallback origin 不存在，API 返回错误，这是正常的
+      console.log(`    Fallback Origin 尚未设置（首次配置）`);
+    }
     if (current && current.origin === fallbackFqdn && current.status === 'active') {
       console.log(`    Fallback Origin 已设置为 ${fallbackFqdn} (active) → 跳过`);
       fallbackReady = true;
@@ -378,17 +384,17 @@ async function processZone(zoneName, tokenKey, fqdns) {
     const existing = existingMap.get(fqdn);
 
     if (existing) {
-      // 检查 custom_origin 是否匹配
-      if (existing.custom_origin === origin && existing.status === 'active') {
+      // 检查 custom_origin_server 是否匹配
+      if (existing.custom_origin_server === origin && existing.status === 'active') {
         console.log(`    Custom Hostname 已存在且 origin 匹配 (active) → 跳过`);
         hostnameStats.skipped++;
         continue;
       }
 
       // origin 不匹配或状态不 active，需要更新
-      // CF API 不支持直接更新 Custom Hostname 的 custom_origin，需要删除重建
-      if (existing.custom_origin !== origin) {
-        console.log(`    Custom Hostname origin 不匹配 (当前: ${existing.custom_origin || '(无)'}) → 重建`);
+      // CF API 不支持直接更新 Custom Hostname 的 custom_origin_server，需要删除重建
+      if (existing.custom_origin_server !== origin) {
+        console.log(`    Custom Hostname origin 不匹配 (当前: ${existing.custom_origin_server || '(无)'}) → 重建`);
         if (!dryRun) {
           try {
             await deleteCustomHostname(zoneId, existing.id, tokenKey);

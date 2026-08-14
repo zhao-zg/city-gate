@@ -240,12 +240,13 @@ function buildFirewallConfig() {
         // cities 非 ALL 且有 provinces → 省级围栏
         if (!cities.includes('ALL') && provinces.length > 0) {
           // 提取英文省份名（CF ip.geo.subdivision 返回英文）
-          const enProvinces = provinces.map(p => PROVINCE_CN_TO_EN[p] || p);
+          // 配置中可能同时包含中文和英文（如 ["浙江", "Zhejiang"]），映射后去重
+          const enProvinces = [...new Set(provinces.map(p => PROVINCE_CN_TO_EN[p] || p))];
 
           // 构建表达式：匹配该 hostname 且不在指定省份
           // 多个省份用 or 连接
           const provinceExprs = enProvinces.map(p => `ip.geo.subdivision eq "${p}"`).join(' or ');
-          const expression = `(hostname eq "${fqdn}") and not (${provinceExprs})`;
+          const expression = `(http.host eq "${fqdn}") and not (${provinceExprs})`;
 
           rules.push({
             type: 'geo-restrict',
@@ -263,7 +264,7 @@ function buildFirewallConfig() {
         if (schedule && schedule.periods && schedule.periods.length > 0) {
           // 规则只做 Block，不做时间判断
           // 时段控制由 Docker cron 定时 enable/disable 实现
-          const expression = `(hostname eq "${fqdn}")`;
+          const expression = `(http.host eq "${fqdn}")`;
           const periods = schedule.periods.join(', ');
 
           rules.push({
