@@ -136,7 +136,6 @@ async function getCustomHostname(zoneId, hostname, tokenKey) {
 async function createCustomHostname(zoneId, hostname, customOrigin, tokenKey) {
   const body = {
     hostname,
-    ssl: { method: 'http' },
   };
   if (customOrigin) {
     body.custom_origin_server = customOrigin;
@@ -425,7 +424,7 @@ async function processZone(zoneName, tokenKey, fqdns) {
     }
 
     // 创建新的 Custom Hostname
-    console.log(`    创建 Custom Hostname (custom_origin: ${origin}, ssl: http)`);
+    console.log(`    创建 Custom Hostname (custom_origin: ${origin})`);
     if (!dryRun) {
       try {
         const ch = await createCustomHostname(zoneId, fqdn, origin, tokenKey);
