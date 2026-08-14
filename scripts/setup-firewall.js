@@ -275,13 +275,22 @@ function buildFirewallConfig() {
         // ── 地理围栏规则 ──
         // cities 非 ALL 且有 provinces → 省级围栏
         if (!cities.includes('ALL') && provinces.length > 0) {
-          // 提取 ISO 3166-2 代码（CF ip.src.subdivision_1_iso_code 返回如 "CN-ZJ"）
+          // 提取英文省份名（CF ip.src.region 返回英文区域名如 "Zhejiang"）
           // 配置中可能同时包含中文和英文（如 ["浙江", "Zhejiang"]），映射后去重
-          const isoCodes = [...new Set(provinces.map(p => PROVINCE_CN_TO_CODE[p] || p))];
+          // 优先使用 PROVINCE_CN_TO_CODE 中的英文名，否则直接使用原始值
+          const enProvinces = [...new Set(provinces.map(p => {
+            const code = PROVINCE_CN_TO_CODE[p];
+            // 如果是中文，从 CODE 映射表反查英文名
+            if (code) {
+              const enEntry = Object.entries(PROVINCE_CN_TO_CODE).find(([k, v]) => v === code && /^[A-Z]/.test(k));
+              return enEntry ? enEntry[0] : p;
+            }
+            return p;
+          }))];
 
           // 构建表达式：匹配该 hostname 且不在指定省份
-          // 使用 ip.src.subdivision_1_iso_code 字段（Business 计划以上可用）
-          const provinceExprs = isoCodes.map(c => `ip.src.subdivision_1_iso_code eq "${c}"`).join(' or ');
+          // 使用 ip.src.region 字段（免费版可用，返回英文区域名）
+          const provinceExprs = enProvinces.map(p => `ip.src.region eq "${p}"`).join(' or ');
           const expression = `(http.host eq "${fqdn}") and not (${provinceExprs})`;
 
           rules.push({
@@ -289,7 +298,7 @@ function buildFirewallConfig() {
             fqdn,
             expression,
             action: 'block',
-            description: `${group.prefix}-geo-restrict (block non-${isoCodes.join('/')})`,
+            description: `${group.prefix}-geo-restrict (block non-${enProvinces.join('/')})`,
             enabled: true,
           });
         }
