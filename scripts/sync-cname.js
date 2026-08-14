@@ -58,6 +58,7 @@ const WORKER_TOKEN_KEYS = {
 //   无容灾意义（挂都挂），反而稀释池子。validatePool 也会自动去重兜底。
 const CNAME_POOL = [
   // ── 原池保留（历史实测干净）──
+  'saas.sin.fan',
   'cf.090227.xyz',
   'cf.877774.xyz',
   'cf.yfjc.sbs',
@@ -68,12 +69,12 @@ const CNAME_POOL = [
   'www.shopify.com',
   'icook.hk',
   // ── cfIpTop20 补充（2026-08-11 全 IP 检测通过，同二级域名去重）──
-  'g.lma.de5.net',
-  'cdn.2x.nz',
-  'blog.646474.xyz',
-  'yg8.ygkkk.dpdns.org',
-  'cdn.091224.xyz',
-  'b3.cfyx.20237737.xyz'
+  //'g.lma.de5.net',
+  //'cdn.2x.nz',
+  //'blog.646474.xyz',
+  //'yg8.ygkkk.dpdns.org',
+  //'cdn.091224.xyz',
+  //'b3.cfyx.20237737.xyz'
 ];
 
 // ── 从 wrangler.toml 自动提取 Zone 配置 ──────────────────
