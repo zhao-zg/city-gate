@@ -100,11 +100,12 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
  * 从优选域名池收集所有可用 IP，检测质量后排序
  * 返回按延迟排序的可用 IP 列表 [{ ip, latency, source }]
  */
-async function buildIpPool(testHost) {
+async function buildIpPool(testHost, poolZonesCount = 1) {
   console.log('\n── IP 池构建 ──');
   console.log(`  测试 Host: ${testHost}`);
   console.log(`  去重前缀: /${IP_DEDUP_PREFIX}`);
-  console.log(`  每 zone: ${IP_PER_ZONE} 个 IP\n`);
+  console.log(`  每 zone: ${IP_PER_ZONE} 个 IP`);
+  console.log(`  最少需要: ${poolZonesCount * IP_PER_ZONE} 个 IP\n`);
 
   // 第1步：从 CNAME_POOL 收集 IP（复用 resolveIps）
   console.log('  [1] 从优选域名池解析 IP...');
@@ -179,10 +180,29 @@ async function buildIpPool(testHost) {
     throw new Error('没有可用的 IP！');
   }
 
-  // 第4步：同 /24 去重，按延迟排序
-  console.log(`\n  [4] 同 /${IP_DEDUP_PREFIX} 去重...`);
-  const deduped = dedupIps(good);
-  console.log(`  去重后: ${deduped.length} 个 IP（按延迟排序）`);
+  // 第4步：自适应去重，按延迟排序
+  // 如果 /N 去重后数量不够（少于 zone 数 × IP_PER_ZONE），自动放宽前缀长度
+  const minNeeded = poolZonesCount * IP_PER_ZONE;
+  let deduped = [];
+  let curPrefix = IP_DEDUP_PREFIX;
+  const validPrefixes = [32, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16];
+
+  // 从用户配置的前缀开始，逐步放宽直到数量够或到 /16
+  const startIdx = validPrefixes.indexOf(IP_DEDUP_PREFIX);
+  for (let i = (startIdx >= 0 ? startIdx : 0); i < validPrefixes.length; i++) {
+    const p = validPrefixes[i];
+    deduped = dedupIps(good, p);
+    console.log(`  [4] /${p} 去重 → ${deduped.length} 个 IP${deduped.length >= minNeeded ? ' ✓' : ' (不够，继续放宽)'}`);
+    if (deduped.length >= minNeeded) break;
+  }
+
+  // 放宽到极限还是不够，用全部可用 IP（不去重）
+  if (deduped.length < minNeeded) {
+    console.log(`  ⚠  去重后仅 ${deduped.length} 个，少于需求 ${minNeeded} 个，保留全部可用 IP`);
+    deduped = good.slice().sort((a, b) => a.latency - b.latency);
+  }
+
+  console.log(`  最终: ${deduped.length} 个 IP（按延迟排序）`);
   for (const { ip, latency } of deduped.slice(0, 20)) {
     console.log(`    ${ip.padEnd(18)} ${latency}ms`);
   }
@@ -486,7 +506,7 @@ async function main() {
   }
 
   // 第1步：构建 IP 池
-  const ipPool = await buildIpPool(testHost);
+  const ipPool = await buildIpPool(testHost, poolZones.length);
 
   if (ipPool.length < poolZones.length) {
     console.log(`\n  ⚠  IP 池仅 ${ipPool.length} 个，少于 zone 数 ${poolZones.length}，将跨 zone 复用`);
