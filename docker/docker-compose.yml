@@ -1,8 +1,8 @@
 services:
   city-gate-cron:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    # 使用 GitHub Actions 自动构建并推送到 GHCR 的镜像
+    # 多架构支持：linux/amd64 + linux/arm64
+    image: ghcr.io/zhao-zg/city-gate-cron:latest
     container_name: city-gate-cron
     restart: unless-stopped
     environment:
