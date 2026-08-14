@@ -4,7 +4,7 @@ FROM node:22-alpine
 RUN apk add --no-cache dcron tzdata ca-certificates && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
-    apk del tzdata
+    echo "Asia/Shanghai" > /etc/TZ
 
 WORKDIR /app
 
