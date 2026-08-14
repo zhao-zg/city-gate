@@ -1,0 +1,26 @@
+services:
+  city-gate-cron:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: city-gate-cron
+    restart: unless-stopped
+    environment:
+      # ── 必填：Cloudflare API Token ──
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      # ── 可选：账户2 Token（多账户场景） ──
+      - CLOUDFLARE_API_TOKEN_2=${CLOUDFLARE_API_TOKEN_2:-}
+      # ── 定时计划（cron 表达式，默认每 6 小时） ──
+      - CRON_SCHEDULE=${CRON_SCHEDULE:-0 */6 * * *}
+      # ── 运行模式: sync（同步 CNAME） / check（仅检测） ──
+      - RUN_MODE=${RUN_MODE:-sync}
+      # ── 预览模式: 1=仅预览不执行修改 / 0=正常执行 ──
+      - DRY_RUN=${DRY_RUN:-0}
+      # ── 时区 ──
+      - TZ=${TZ:-Asia/Shanghai}
+      # ── Push 通知（可选，需配置通知 URL） ──
+      - NOTIFY_URL=${NOTIFY_URL:-}
+      - NOTIFY_TOKEN=${NOTIFY_TOKEN:-}
+    volumes:
+      # 持久化日志
+      - ./logs:/var/log/city-gate
