@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'c974f917-8f0d-4b19-bb20-cd2c0d7a56fe'
-  PropagateID: 'c974f917-8f0d-4b19-bb20-cd2c0d7a56fe'
-  ReservedCode1: '98aac054-c0e3-4e70-87eb-bb5d33ef8bc0'
-  ReservedCode2: '98aac054-c0e3-4e70-87eb-bb5d33ef8bc0'
+  ProduceID: '4f68da9c-b68a-4fc6-ad2d-5a231ea22aab'
+  PropagateID: '4f68da9c-b68a-4fc6-ad2d-5a231ea22aab'
+  ReservedCode1: 'c1e5688f-b8f0-4cbf-ad3b-584d84f29a5c'
+  ReservedCode2: 'c1e5688f-b8f0-4cbf-ad3b-584d84f29a5c'
 ---
 
 # A 记录直连方案设计
@@ -203,8 +203,31 @@ CLOUDFLARE_API_TOKEN=xxx
 | 误删所有 A 记录 | 增量更新，只删不匹配的，先建后删 |
 | 迁移期 CNAME 和 A 冲突 | 先删 CNAME 再建 A 记录 |
 
-## 8. 待确认
+## 8. 已确认决策
 
-1. noPreferred zone 是否也改 A 记录直连源站 IP？（当前方案保持原样，直连源站）
-2. 是否需要在 IP 替换时发通知？
-3. CI（GitHub Actions）是否也切换到新脚本，还是只在国内 Docker 跑？
+1. **noPreferred zone** — 保持原样，继续直连源站（如 sg-f3b.pages.dev），不改 A 记录
+2. **CI 切换** — GitHub Actions 停掉 sync-cname 定时任务，只靠国内 Docker 定时跑 A 记录同步
+3. **替换通知** — 不需要，只看日志
+
+## 9. 实施计划（Phase 2）
+
+### Task 1: 创建 sync-dns.js 核心脚本
+- 复用 sync-cname.js 的 IP 收集/检测函数（require 导入）
+- 新增 `measureLatency(ip, testHost)` — TCP 握手延迟测量
+- 新增 `dedupIps(ips, prefixLen)` — 同 /24 段去重，保留延迟最低
+- 新增 `buildIpPool(testHost)` — 收集+检测+排序，返回可用 IP 池
+- 新增 `assignIpsToZones(zoneMap, ipPool, ipPerZone)` — 分配 IP 组
+- 新增 `createARecord(zoneId, name, ip, tokenKey)` — 创建 A 记录
+- 新增 `processARecords(assignments)` — 同步 DNS（含 CNAME→A 迁移）
+
+### Task 2: 更新 Docker 配置
+- `docker/Dockerfile` — 默认脚本改为 sync-dns.js
+- `docker/entrypoint.sh` — 默认脚本改为 sync-dns.js
+- `docker/.env.example` — 新增 IP_PER_ZONE 等变量说明
+
+### Task 3: 停用 CI 定时任务
+- `.github/workflows/sync-cname.yml` — 注释掉 schedule，保留 workflow_dispatch 手动触发
+
+### Task 4: 测试验证
+- 本地 dry-run 运行，确认 IP 收集、检测、分配逻辑正确
+- 确认 DNS 记录同步（CNAME→A 迁移）逻辑正确
