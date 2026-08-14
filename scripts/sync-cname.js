@@ -129,9 +129,12 @@ function stripProtocol(url) {
 
 /**
  * 从 DOMAIN_CONFIG_JSON 展开为 { zoneName, names, tokenKey, noPreferred?, origins? } 列表
+ * @param {object} config - 解析后的 DOMAIN_CONFIG_JSON
+ * @param {string} workerNameOrTokenKey - Worker 名称（如 "city-gate"）或直接传 tokenKey（如 "default"）
+ *   传入 Worker 名时查 WORKER_TOKEN_KEYS 映射；传入的值不在映射表中时直接作为 tokenKey 使用
  */
-function buildZoneMapFromConfig(config, workerName) {
-  const tokenKey = WORKER_TOKEN_KEYS[workerName] || 'default';
+function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
+  const tokenKey = WORKER_TOKEN_KEYS[workerNameOrTokenKey] || workerNameOrTokenKey || 'default';
   const zones = [];
 
   // zones + prefixes 格式
@@ -150,13 +153,16 @@ function buildZoneMapFromConfig(config, workerName) {
         const zoneName = zoneNameOf(zone);
         if (!zoneName) continue;
         const noPreferred = isNoPreferredZone(zone);
+        // zone 级 tokenKey 覆盖（可选，优先于 config 级 tokenKey）
+        const zoneTokenKey = (typeof zone === 'object' && zone.tokenKey) || null;
 
         let info = zoneInfo.get(zoneName);
         if (!info) {
-          info = { noPreferred: false, origins: {} };
+          info = { noPreferred: false, origins: {}, tokenKey: zoneTokenKey };
           zoneInfo.set(zoneName, info);
         }
         if (noPreferred) info.noPreferred = true;
+        if (zoneTokenKey) info.tokenKey = zoneTokenKey;
 
         // noPreferred zone 需要记录每个前缀对应的源站（CNAME 直连目标）
         if (info.noPreferred && group.origin) {
@@ -170,7 +176,7 @@ function buildZoneMapFromConfig(config, workerName) {
       zones.push({
         zoneName,
         names,
-        tokenKey,
+        tokenKey: info.tokenKey || tokenKey,
         ...(info.noPreferred ? { noPreferred: true, origins: info.origins } : {}),
       });
     }
@@ -196,8 +202,70 @@ function buildZoneMapFromConfig(config, workerName) {
 
 /**
  * 扫描所有 Worker 目录，自动生成 ZONE_MAP
+ *
+ * 支持环境变量覆盖：
+ *   ZONE_CONFIG_JSON — 设置后直接解析为 Zone 配置，跳过 wrangler.toml 扫描
+ *   格式与 wrangler.toml 中的 DOMAIN_CONFIG_JSON 完全一致（zones + groups），
+ *   但支持额外的可选字段实现多账户/自定义 tokenKey：
+ *
+ *   方式1: 单账户（默认 tokenKey=default）
+ *     { "zones": ["a.com"], "groups": [{ "prefix": "sg", "origin": "https://sg.pages.dev" }] }
+ *
+ *   方式2: 多账户（按 zone 指定 tokenKey）
+ *     {
+ *       "zones": [
+ *         { "name": "a.com", "tokenKey": "default" },
+ *         { "name": "b.com", "tokenKey": "account2" }
+ *       ],
+ *       "groups": [{ "prefix": "sg", "origin": "https://sg.pages.dev" }]
+ *     }
+ *
+ *   方式3: 多账户（zones 数组，每个元素可指定 tokenKey）
+ *     {
+ *       "zones": [
+ *         { "name": "a.com" },
+ *         { "name": "b.com", "tokenKey": "account2" }
+ *       ],
+ *       "groups": [...]
+ *     }
+ *
+ *   noPreferred zone 也通过环境变量支持：
+ *     { "name": "c.com", "noPreferred": true }
+ *
+ *   也可传入数组（多 Worker 配置合并），每个元素含 zones + groups + tokenKey:
+ *     [
+ *       { "tokenKey": "default",  "zones": [...], "groups": [...] },
+ *       { "tokenKey": "account2", "zones": [...], "groups": [...] }
+ *     ]
  */
 function autoDetectZoneMap() {
+  // ── 环境变量覆盖 ──
+  if (process.env.ZONE_CONFIG_JSON) {
+    console.log('  [ZONE_CONFIG_JSON] 使用环境变量覆盖 Zone 配置');
+    let configs;
+    try {
+      configs = JSON.parse(process.env.ZONE_CONFIG_JSON);
+    } catch (e) {
+      throw new Error(`ZONE_CONFIG_JSON 解析失败: ${e.message}`);
+    }
+
+    // 统一为数组处理
+    const configList = Array.isArray(configs) ? configs : [configs];
+    const allZones = [];
+
+    for (const entry of configList) {
+      // 数组元素可含 tokenKey 字段指定该组 Zone 的 tokenKey
+      const tokenKey = entry.tokenKey || 'default';
+      // 复用 buildZoneMapFromConfig，但传入自定义 tokenKey
+      const zones = buildZoneMapFromConfig(entry, tokenKey);
+      allZones.push(...zones);
+      console.log(`  [env] (${tokenKey}): ${zones.length} zones, prefixes: ${zones.map(z => z.names.join(',')).join('; ') || '(无)'}`);
+    }
+
+    return allZones;
+  }
+
+  // ── 默认：扫描 wrangler.toml ──
   const workersDir = path.join(__dirname, '..', 'workers');
   const allZones = [];
 

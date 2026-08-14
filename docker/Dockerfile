@@ -30,5 +30,7 @@ ENV DRY_RUN="0"
 ENV IP_PER_ZONE="2"
 # IP 去重前缀长度（/24 = 同段只保留延迟最低的）
 ENV IP_DEDUP_PREFIX="24"
+# Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
+ENV ZONE_CONFIG_JSON=""
 
 ENTRYPOINT ["/entrypoint.sh"]
