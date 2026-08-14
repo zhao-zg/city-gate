@@ -94,14 +94,18 @@
   .app-action--answer:active{transform:scale(.97)}
 
   /* 节点切换器 */
-  .node-switcher{margin-top:6px}
+  .node-switcher{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .node-switcher-current{font-size:12px;color:var(--antd-text-secondary);line-height:1.5;white-space:nowrap}
+  .node-switcher-current .node-current-label{color:var(--antd-text-tertiary)}
+  .node-switcher-current .node-current-name{font-weight:600}
+  .node-switcher-current .node-current-latency{font-size:11px;opacity:.7}
   .node-switcher-toggle{
     font-size:12px;color:var(--antd-text-tertiary);cursor:pointer;
     background:none;border:none;padding:0;line-height:1.5;
     transition:color .2s;
   }
   .node-switcher-toggle:hover{color:var(--antd-text-secondary)}
-  .node-switcher-list{display:none;margin-top:8px;gap:6px;flex-wrap:wrap}
+  .node-switcher-list{display:none;width:100%;margin-top:4px;gap:6px;flex-wrap:wrap}
   .node-switcher-list.open{display:flex}
   .node-item{
     display:inline-flex;align-items:center;gap:4px;
@@ -124,6 +128,7 @@
 
 <div class="section">
   <div class="node-switcher">
+    <span class="node-switcher-current" id="node-current"><span class="node-current-label">当前节点:</span> <span class="node-current-name">测速中…</span></span>
     <button class="node-switcher-toggle" id="node-toggle">切换节点 ▾</button>
     <div class="node-switcher-list" id="node-list"></div>
   </div>
@@ -226,8 +231,8 @@ function raceSuffix() {
       var t = results[s];
       if (t !== undefined && t < bestTime) { bestTime = t; best = s; }
     });
-    // 优先用初始节点（当前域名/缓存），否则用竞速最快的
-    var suffix = initialSuffix || best;
+    // 始终选竞速最快的节点
+    var suffix = best;
     var latency = (results[suffix] != null && results[suffix] < 99999) ? results[suffix] : null;
     setCachedSuffix(suffix);
     return { suffix: suffix, latency: latency, results: results };
@@ -336,12 +341,8 @@ function init() {
       answerBtn.textContent = '打开 Answer';
     }
     bindButtons(suffix);
-    // Show fastest suffix and latency
-    var hint = document.querySelector('.section-hint');
-    if (hint) {
-      var latencyText = (latency !== null && latency !== undefined && latency < 99999) ? ' (' + latency + 'ms)' : '';
-      hint.textContent += '  |  当前节点: ' + suffix + latencyText;
-    }
+    // 更新当前节点显示
+    updateNodeCurrent(suffix, latency);
     // Render node switcher
     renderNodeSwitcher(suffix, raceResults);
   });
@@ -385,6 +386,13 @@ function renderNodeSwitcher(activeSuffix, raceResults) {
   });
 }
 
+function updateNodeCurrent(suffix, latency) {
+  var el = document.getElementById('node-current');
+  if (!el) return;
+  var latencyText = (latency !== null && latency !== undefined && latency < 99999) ? ' <span class="node-current-latency">' + latency + 'ms</span>' : '';
+  el.innerHTML = '<span class="node-current-label">当前节点:</span> <span class="node-current-name">' + suffix + '</span>' + latencyText;
+}
+
 function switchNode(suffix) {
   setCachedSuffix(suffix);
   // 更新按钮绑定
@@ -393,16 +401,9 @@ function switchNode(suffix) {
   document.querySelectorAll('.node-item').forEach(function(el) {
     el.classList.toggle('active', el.getAttribute('data-suffix') === suffix);
   });
-  // 更新提示文字（只更新含"当前节点:"的 hint，避免误改 iOS 提示）
-  var latencyMs = (window._lastRaceResults && window._lastRaceResults[suffix] != null && window._lastRaceResults[suffix] < 99999)
-    ? ' (' + window._lastRaceResults[suffix] + 'ms)' : '';
-  document.querySelectorAll('.section-hint').forEach(function(hint) {
-    var text = hint.textContent;
-    var idx = text.indexOf('当前节点:');
-    if (idx !== -1) {
-      hint.textContent = text.substring(0, idx) + '当前节点: ' + suffix + latencyMs;
-    }
-  });
+  // 更新当前节点显示
+  var latency = (window._lastRaceResults && window._lastRaceResults[suffix] != null && window._lastRaceResults[suffix] < 99999) ? window._lastRaceResults[suffix] : null;
+  updateNodeCurrent(suffix, latency);
 }
 
 init();
