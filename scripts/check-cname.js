@@ -5,8 +5,8 @@
  * 功能：
  *   1. 自动扫描 workers/ 下所有 wrangler.toml，提取 zones + prefixes
  *   2. 查询每个 FQDN 当前实际 CNAME 目标（优先 Cloudflare API，无 Token 时回退权威 DNS）
- *   3. 对每个 CNAME 目标做真实请求 1034 验证（用对应 FQDN 做 Host + SNI）
- *   4. 输出报告：哪些 FQDN 正常、哪些会触发 1034、哪些缺记录
+ *   3. 对每个 CNAME 目标做真实请求验证（1034/挑战页检测，用对应 FQDN 做 Host + SNI）
+ *   4. 输出报告：哪些 FQDN 正常、哪些触发 1034/挑战页、哪些缺记录
  *
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN  — 默认账户 Token（可选；设置后走 API 精确查询）
@@ -58,7 +58,7 @@ async function checkTarget(domain, testHost) {
   if (reserved.length > 0) {
     return { ok: false, ips, detail: `解析到 CF 保留 IP ${reserved.join(', ')}（必 1034）` };
   }
-  // 严格判定：对收集到的全部 IP 逐一实测，任一 IP 触发 1034 即标记风险
+  // 严格判定：对收集到的全部 IP 逐一实测，任一 IP 触发 1034/挑战页即标记风险
   const checks = await Promise.all(ips.map(async (ip) => {
     const r = await sc.testIp1034(ip, testHost);
     return { ip, ...r };
@@ -69,16 +69,16 @@ async function checkTarget(domain, testHost) {
     return { ok: true, ips, detail: 'OK' };
   }
   if (good.length === 0) {
-    return { ok: false, ips, detail: `全部 ${checks.length} 个 IP 1034: ${bad.map(r => r.ip).join(', ')}` };
+    return { ok: false, ips, detail: `全部 ${checks.length} 个 IP 不可用: ${bad.map(r => r.ip + ' ' + r.reason).join('; ')}` };
   }
-  return { ok: false, ips, detail: `⚠ 混合池 ${bad.length}/${checks.length} IP 1034: ${bad.map(r => r.ip + ' ' + r.reason).join('; ')}` };
+  return { ok: false, ips, detail: `⚠ 混合池 ${bad.length}/${checks.length} IP 不可用: ${bad.map(r => r.ip + ' ' + r.reason).join('; ')}` };
 }
 
 // ── 主流程 ─────────────────────────────────────────────
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  CNAME 现状检查 + 1034 实测                    ║');
+  console.log('║  CNAME 现状检查 + 1034/挑战页实测             ║');
   console.log('╚════════════════════════════════════════════════╝');
 
   const useApi = hasToken();
@@ -124,7 +124,7 @@ async function main() {
   }
 
   // 5. 打印报告
-  console.log('\n── 当前 CNAME 现状 + 1034 实测 ──\n');
+  console.log('\n── 当前 CNAME 现状 + 1034/挑战页实测 ──\n');
   const line = '─'.repeat(112);
   console.log(`┌${line}┐`);
   console.log(`│ ${'FQDN'.padEnd(26)} │ ${'CNAME 目标'.padEnd(24)} │ ${'状态'.padEnd(12)} │ 详情${' '.repeat(38)}│`);
@@ -138,7 +138,7 @@ async function main() {
       console.log(`│ ${r.fqdn.padEnd(26)} │ ${'(无 CNAME)'.padEnd(24)} │ ${'— 缺记录'.padEnd(12)} │ ${'FQDN 无 CNAME 记录'.padEnd(40)}│`);
     } else if (!rep.ok) {
       bad++;
-      console.log(`│ ${r.fqdn.padEnd(26)} │ ${r.target.padEnd(24)} │ ${'✗ 1034'.padEnd(12)} │ ${String(rep.ips.join(',') + ' ' + rep.detail).padEnd(40)}│`);
+      console.log(`│ ${r.fqdn.padEnd(26)} │ ${r.target.padEnd(24)} │ ${'✗ 风险'.padEnd(12)} │ ${String(rep.ips.join(',') + ' ' + rep.detail).padEnd(40)}│`);
     } else {
       const detail = rep.detail === 'OK' ? rep.ips.join(',') : rep.ips.join(',') + ' ' + rep.detail;
       console.log(`│ ${r.fqdn.padEnd(26)} │ ${r.target.padEnd(24)} │ ${'✓ 正常'.padEnd(12)} │ ${String(detail).padEnd(40)}│`);
@@ -146,7 +146,7 @@ async function main() {
   }
   console.log(`└${line}┘`);
 
-  console.log(`\n  汇总: 共 ${rows.length} 条记录，正常 ${rows.length - bad - missing}，1034 风险 ${bad}，缺记录 ${missing}`);
+  console.log(`\n  汇总: 共 ${rows.length} 条记录，正常 ${rows.length - bad - missing}，1034/挑战页风险 ${bad}，缺记录 ${missing}`);
 
   // 6. 目标域名去重统计
   console.log('\n  目标域名状态:');

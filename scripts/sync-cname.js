@@ -325,8 +325,26 @@ async function resolveIps(domain) {
 }
 
 /**
+ * 判断是否为 Cloudflare 挑战页（验证码/JS Challenge/WAF 拦截）
+ * 挑战页特征：
+ *   - HTTP 403（也有 503 用于 Under Attack 模式）
+ *   - 响应体含 cf-browser-verify、challenge-platform、Just a moment、Checking if 等关键词
+ *   - 用户访问时看到"请验证您是真人"或 Turnstile 验证码
+ *   - 与 Worker 正常 403（城市限制拒绝）的区别：Worker 返回的是自定义响应，不含 CF 挑战页特征
+ * 任一 IP 出现挑战页即禁用该优选域名，与 1034 同等处理：
+ *   用户可能随机命中该 IP，遭遇验证码即服务不可用
+ */
+function isChallengePage(statusCode, body) {
+  // 只在 403/503 范围内检测（挑战页的典型状态码）
+  if (statusCode !== 403 && statusCode !== 503) return false;
+  // Cloudflare 挑战页特征关键词（覆盖 JS Challenge / Managed Challenge / Under Attack / Turnstile）
+  return /cf-browser-verify|challenge-platform|Just a moment|Checking if the site|Enable JavaScript|cf_chl_opt|Challenge running|Attention Required/i.test(body);
+}
+
+/**
  * 真实请求验证（单次）：用自家域名（testHost）做 Host + SNI 直连指定 IP
  * 响应含 "error code: 1034" → 该 IP 处于受限空间且 Host 未授权 → 不可用
+ * 响应含 Cloudflare 挑战页（验证码） → 用户遭遇验证码 → 不可用
  * 其他任何 HTTP 响应（200/403/530 等）都说明网络通路正常 → 可用
  * 注意：testHost 必须是**真实存在 CNAME 记录**的自家子域名，
  *       不存在的子域名只会得到 1016（Origin DNS error），无法触发 1034 判定
@@ -349,18 +367,25 @@ function testIp1034Once(ip, testHost) {
       res.on('data', (chunk) => {
         body += chunk;
         if (body.length >= 8192) {
-          // 1034 错误页远小于 8KB，到这里还没出现说明不是 1034
+          // 1034 错误页和挑战页远小于 8KB，到这里还没出现说明正常
           res.destroy();
           finish({ ok: true, reason: `HTTP ${res.statusCode}` });
         } else if (/error code:\s*1034|error 1034/i.test(body)) {
           res.destroy();
           finish({ ok: false, reason: `HTTP ${res.statusCode} 1034` });
+        } else if (isChallengePage(res.statusCode, body)) {
+          res.destroy();
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）` });
         }
       });
       res.on('end', () => {
-        finish(/error code:\s*1034|error 1034/i.test(body)
-          ? { ok: false, reason: `HTTP ${res.statusCode} 1034` }
-          : { ok: true, reason: `HTTP ${res.statusCode}` });
+        if (/error code:\s*1034|error 1034/i.test(body)) {
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034` });
+        } else if (isChallengePage(res.statusCode, body)) {
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）` });
+        } else {
+          finish({ ok: true, reason: `HTTP ${res.statusCode}` });
+        }
       });
     });
 
@@ -385,7 +410,7 @@ function testIp1034Once(ip, testHost) {
 /**
  * 真实请求验证（带重试）：
  * - 成功（ok）→ 直接返回
- * - 1034（硬判定，IP 受限是稳定特性）→ 直接接受，重试不会改变结果
+ * - 1034/挑战页（硬判定，IP 受限或被 WAF 拦截是稳定特性）→ 直接接受，重试不会改变结果
  * - 软错误（超时/连接失败/ECONNRESET 等）→ 重试 POOL_IP_RETRIES 次
  *   实测部分 IP 偶发连接失败（如 2/3 能连上），多重试可避免误判
  */
@@ -395,6 +420,7 @@ async function testIp1034(ip, testHost) {
     last = await testIp1034Once(ip, testHost);
     if (last.ok) return last;                                  // 可用
     if (/1034/i.test(last.reason)) return last;                // 硬判定
+    if (/挑战页|验证码/i.test(last.reason)) return last;       // 硬判定（WAF 拦截）
     // 软错误 → 继续重试
   }
   return last;
@@ -420,8 +446,8 @@ function buildTestHost(zoneMap) {
  * 1. DNS 解析（无 A 记录 → 不可用）
  * 2. 快速短路：解析到 CF 公共保留 IP（1.1.1.1 等）→ 必 1034，不可用
  * 3. 真实请求验证：对**收集到的全部 IP** 用自家域名做 Host 逐一访问
- *    判定规则：**任一 IP 触发 1034 即判不可用**——
- *    轮询域名每个 IP 都可能被用户命中，混合池（部分 IP 1034）依然危险，
+ *    判定规则：**任一 IP 触发 1034 或挑战页（验证码）即判不可用**——
+ *    轮询域名每个 IP 都可能被用户命中，混合池（部分 IP 1034/挑战页）依然危险，
  *    绝不能因"还有 N 个可用"而分配出去。
  */
 async function checkPoolDomain(domain, testHost) {
@@ -450,11 +476,11 @@ async function checkPoolDomain(domain, testHost) {
   }
   if (good.length === 0) {
     const badIps = bad.map(r => `${r.ip}(${r.reason})`).join('; ');
-    return { ok: false, reason: `全部 ${checks.length} 个 IP 触发 1034: ${badIps}` };
+    return { ok: false, reason: `全部 ${checks.length} 个 IP 不可用: ${badIps}` };
   }
-  // 混合池：部分 IP 触发 1034 → 用户可能随机命中受限 IP，视为不可用
+  // 混合池：部分 IP 触发 1034/挑战页 → 用户可能随机命中受限 IP，视为不可用
   const badIps = bad.map(r => `${r.ip}(${r.reason})`).join('; ');
-  return { ok: false, reason: `⚠ 混合池 ${bad.length}/${checks.length} IP 触发 1034（${badIps}），用户可能命中受限 IP，禁用` };
+  return { ok: false, reason: `⚠ 混合池 ${bad.length}/${checks.length} IP 不可用（${badIps}），用户可能命中受限 IP/挑战页，禁用` };
 }
 
 /**
@@ -502,7 +528,7 @@ async function validatePool(pool, testHost) {
   const invalid = results.filter(r => !r.ok);
 
   if (invalid.length > 0) {
-    console.log(`\n  ⚠  ${invalid.length} 个域名有 1034 风险，已跳过:`);
+    console.log(`\n  ⚠  ${invalid.length} 个域名有 1034/挑战页风险，已跳过:`);
     for (const r of invalid) {
       console.log(`     - ${r.domain}: ${r.reason}`);
     }
@@ -857,11 +883,12 @@ module.exports = {
   buildZoneMapFromConfig,
   resolveIps,
   is1034Ip,
+  isChallengePage,
   testIp1034,
   testIp1034Once,
   checkPoolDomain,
   registrableDomain,
-  fetchCfIpTop20,
+  fetchCfTop20: fetchCfIpTop20,
   autoRefillPool,
   buildAssignmentPlan,
   getZoneId,
