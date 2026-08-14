@@ -1,39 +1,30 @@
-name: 部署 Workers
+name: 部署 Pages + SaaS + Firewall
 
 on:
   push:
     branches: [master]
   workflow_dispatch:
     inputs:
-      worker:
-        description: '指定部署的 Worker（留空则部署全部）'
-        required: false
-        type: string
-      update_xdb:
-        description: '更新 ip2region xdb（1=是，0=跳过）'
-        required: false
-        type: string
-        default: '1'
       accounts:
         description: '部署目标账户（1=账户1，2=账户2，1,2=两个账户，留空则全部）'
         required: false
         type: string
         default: '1,2'
   schedule:
-    # 每周一 UTC 0:00 自动检查 v4/v6 xdb 更新
+    # 每周一 UTC 0:00 自动检查 SaaS/Firewall 配置一致性
     - cron: '0 0 * * 1'
 
 # ── 多账户配置 ──────────────────────────────────────────
 # 每个账户独立 job，避免 matrix + secrets 动态引用限制
-# 新增账户只需：1) 添加 GitHub Secrets  2) 复制一份 deploy-account-N job
+# 新增账户只需：1) 添加 GitHub Secrets  2) 复制一份对应 job
 
 jobs:
   # ================================================================
-  #  Job 1：更新 ip2region xdb（账户1）
+  #  Job 1：SaaS 配置（账户1）
   # ================================================================
-  update-xdb-1:
+  setup-saas-1:
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.update_xdb != '0' || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -41,19 +32,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 更新 ip2region xdb 到 KV（账户1）
+      - name: 配置 CF for SaaS（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          KV_NAMESPACE_ID: ${{ secrets.KV_IP2REGION_NAMESPACE_ID }}
-        run: node scripts/update-ip2region.js
+        run: node scripts/setup-saas.js
 
   # ================================================================
-  #  Job 2：更新 ip2region xdb（账户2）
+  #  Job 2：SaaS 配置（账户2）
   # ================================================================
-  update-xdb-2:
+  setup-saas-2:
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.update_xdb != '0' || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - name: 检查是否部署账户2
         id: check
@@ -72,26 +61,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 更新 ip2region xdb 到 KV（账户2）
+      - name: 配置 CF for SaaS（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
-          KV_NAMESPACE_ID: ${{ secrets.KV_IP2REGION_NAMESPACE_ID_2 }}
-          KV_NAMESPACE_TITLE: city-gate-2-IP2REGION
-        run: node scripts/update-ip2region.js
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+        run: node scripts/setup-saas.js
 
   # ================================================================
-  #  Job 3：部署 Workers（账户1）
+  #  Job 3：Firewall 配置（账户1）
   # ================================================================
-  deploy-account-1:
+  setup-firewall-1:
     runs-on: ubuntu-latest
-    needs: [update-xdb-1]
-    if: >-
-      ${{
-        (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-        (needs.update-xdb-1.result == 'success' || needs.update-xdb-1.result == 'skipped')
-      }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -99,76 +81,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 安装 wrangler
-        run: npm install -g wrangler
-      - name: 生成部署配置
-        run: node scripts/generate-routes.js
-
-      - name: 注入 KV namespace ID（账户1）
+      - name: 配置 WAF Custom Rules（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          KV_ID="${{ secrets.KV_IP2REGION_NAMESPACE_ID }}"
-          if [ -z "$KV_ID" ]; then
-            echo "通过 API 查找 KV namespace city-gate-IP2REGION..."
-            RESPONSE=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces")
-            KV_ID=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for ns in data.get('result', []):
-              if ns.get('title') == 'city-gate-IP2REGION':
-                  print(ns['id'])
-                  break
-          " 2>/dev/null || true)
-          fi
-          if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
-            for toml in workers/city-gate/wrangler.generated.toml; do
-              if [ -f "$toml" ] && grep -q "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" "$toml"; then
-                sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" "$toml"
-                echo "已注入 KV namespace id 到 $toml: $KV_ID"
-              fi
-            done
-          else
-            echo "警告: 账户1未找到 KV namespace id"
-          fi
-      - name: 确定要部署的 Workers
-        id: workers
-        run: |
-          if [ -n "${{ github.event.inputs.worker }}" ]; then
-            WORKERS="${{ github.event.inputs.worker }}"
-          else
-            WORKERS="city-gate"
-          fi
-          echo "list=$WORKERS" >> "$GITHUB_OUTPUT"
-          echo "账户1将部署: $WORKERS"
-      - name: 部署 Workers（账户1）
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          for worker in ${{ steps.workers.outputs.list }}; do
-            echo "部署账户1/$worker ..."
-            if (cd "workers/$worker" && wrangler deploy -c wrangler.generated.toml); then
-              echo "✓ 账户1/$worker 部署成功"
-            else
-              echo "✗ 账户1/$worker 部署失败"
-              exit 1
-            fi
-          done
+        run: node scripts/setup-firewall.js
 
   # ================================================================
-  #  Job 4：部署 Workers（账户2）
+  #  Job 4：Firewall 配置（账户2）
   # ================================================================
-  deploy-account-2:
+  setup-firewall-2:
     runs-on: ubuntu-latest
-    needs: [update-xdb-2]
-    if: >-
-      ${{
-        (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-        (needs.update-xdb-2.result == 'success' || needs.update-xdb-2.result == 'skipped')
-      }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - name: 检查是否部署账户2
         id: check
@@ -178,7 +101,6 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "跳过账户2部署"
           fi
       - name: 检出代码
         if: steps.check.outputs.skip == 'false'
@@ -188,72 +110,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 安装 wrangler
-        if: steps.check.outputs.skip == 'false'
-        run: npm install -g wrangler
-      - name: 生成部署配置
-        if: steps.check.outputs.skip == 'false'
-        run: node scripts/generate-routes.js
-
-      - name: 注入 KV namespace ID（账户2）
+      - name: 配置 WAF Custom Rules（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
-        run: |
-          KV_ID="${{ secrets.KV_IP2REGION_NAMESPACE_ID_2 }}"
-          if [ -z "$KV_ID" ]; then
-            echo "通过 API 查找 KV namespace city-gate-2-IP2REGION..."
-            RESPONSE=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces")
-            KV_ID=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for ns in data.get('result', []):
-              if ns.get('title') == 'city-gate-2-IP2REGION':
-                  print(ns['id'])
-                  break
-          " 2>/dev/null || true)
-          fi
-          if [ -n "$KV_ID" ] && [ "$KV_ID" != "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" ]; then
-            for toml in workers/city-gate-2/wrangler.generated.toml; do
-              if [ -f "$toml" ] && grep -q "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID" "$toml"; then
-                sed -i "s/PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID/$KV_ID/g" "$toml"
-                echo "已注入 KV namespace id 到 $toml: $KV_ID"
-              fi
-            done
-          else
-            echo "警告: 账户2未找到 KV namespace id"
-          fi
-      - name: 确定要部署的 Workers
-        if: steps.check.outputs.skip == 'false'
-        id: workers
-        run: |
-          if [ -n "${{ github.event.inputs.worker }}" ]; then
-            WORKERS="${{ github.event.inputs.worker }}"
-          else
-            WORKERS="city-gate-2"
-          fi
-          echo "list=$WORKERS" >> "$GITHUB_OUTPUT"
-          echo "账户2将部署: $WORKERS"
-      - name: 部署 Workers（账户2）
-        if: steps.check.outputs.skip == 'false'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
-        run: |
-          for worker in ${{ steps.workers.outputs.list }}; do
-            echo "部署账户2/$worker ..."
-            if (cd "workers/$worker" && wrangler deploy -c wrangler.generated.toml); then
-              echo "✓ 账户2/$worker 部署成功"
-            else
-              echo "✗ 账户2/$worker 部署失败"
-              exit 1
-            fi
-          done
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+        run: node scripts/setup-firewall.js
 
   # ================================================================
-  #  Job：部署 Pages（cxapk 下载页）
+  #  Job 5：部署 Pages（cxapk 下载页）— 账户1
   # ================================================================
   deploy-pages:
     runs-on: ubuntu-latest
@@ -282,7 +147,7 @@ jobs:
           wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
 
   # ================================================================
-  #  Job：部署 Pages（cxapk 下载页）—— 账户2
+  #  Job 6：部署 Pages（cxapk 下载页）— 账户2
   # ================================================================
   deploy-pages-2:
     runs-on: ubuntu-latest
@@ -327,21 +192,29 @@ jobs:
           wrangler pages deploy pages/cxapk --project-name=cxapk --commit-dirty=true
 
   # ================================================================
-  #  Job 5：部署汇总
+  #  Job 7：部署汇总
   # ================================================================
   deploy-summary:
     runs-on: ubuntu-latest
-    needs: [deploy-account-1, deploy-account-2, deploy-pages, deploy-pages-2]
+    needs: [setup-saas-1, setup-saas-2, setup-firewall-1, setup-firewall-2, deploy-pages, deploy-pages-2]
     if: always()
     steps:
       - name: 部署结果汇总
         run: |
           echo "━━━ 部署结果汇总 ━━━"
-          echo "账户1 Workers: ${{ needs.deploy-account-1.result }}"
-          echo "账户2 Workers: ${{ needs.deploy-account-2.result }}"
-          echo "账户1 Pages: ${{ needs.deploy-pages.result }}"
-          echo "账户2 Pages: ${{ needs.deploy-pages-2.result }}"
-          if [ "${{ needs.deploy-account-1.result }}" = "failure" ] || [ "${{ needs.deploy-account-2.result }}" = "failure" ] || [ "${{ needs.deploy-pages.result }}" = "failure" ] || [ "${{ needs.deploy-pages-2.result }}" = "failure" ]; then
+          echo "账户1 SaaS:     ${{ needs.setup-saas-1.result }}"
+          echo "账户2 SaaS:     ${{ needs.setup-saas-2.result }}"
+          echo "账户1 Firewall: ${{ needs.setup-firewall-1.result }}"
+          echo "账户2 Firewall: ${{ needs.setup-firewall-2.result }}"
+          echo "账户1 Pages:    ${{ needs.deploy-pages.result }}"
+          echo "账户2 Pages:    ${{ needs.deploy-pages-2.result }}"
+          FAILED=false
+          for r in "${{ needs.setup-saas-1.result }}" "${{ needs.setup-saas-2.result }}" "${{ needs.setup-firewall-1.result }}" "${{ needs.setup-firewall-2.result }}" "${{ needs.deploy-pages.result }}" "${{ needs.deploy-pages-2.result }}"; do
+            if [ "$r" = "failure" ]; then
+              FAILED=true
+            fi
+          done
+          if [ "$FAILED" = "true" ]; then
             echo "⚠ 有部署失败"
             exit 1
           fi

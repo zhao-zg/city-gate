@@ -3,184 +3,181 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'b4ef205b-a414-4f13-bff2-6db82249e474'
-  PropagateID: 'b4ef205b-a414-4f13-bff2-6db82249e474'
-  ReservedCode1: '6ba1b111-172f-4f2d-9804-0b1fa854ca59'
-  ReservedCode2: '6ba1b111-172f-4f2d-9804-0b1fa854ca59'
+  ProduceID: '7e0f74fe-828c-47ee-a6fd-fad26df62088'
+  PropagateID: '7e0f74fe-828c-47ee-a6fd-fad26df62088'
+  ReservedCode1: '14d2fea1-e7ce-458a-b609-bd267ed5a7d8'
+  ReservedCode2: '14d2fea1-e7ce-458a-b609-bd267ed5a7d8'
 ---
 
 # city-gate
 
-基于 Cloudflare Workers 的 IP 访问限制网关。一个 Worker 支持多域名、多地区配置。
+基于 Cloudflare for SaaS + A 记录直连优选 IP 的域名管理网关。无 Worker、零冷启动，支持多域名、多账户、地理围栏和时段控制。
+
+## 架构
+
+```
+用户 → DNS A记录 → CF边缘IP(优选) → SaaS Custom Hostname 路由
+     → custom_origin 指向的 Pages 源站 → 返回
+```
+
+- **零 Worker、零 KV、零冷启动**
+- A 记录直连优选 IP（sync-dns.js 自动管理）
+- CF for SaaS 免费 100 个 Custom Hostnames
+- WAF Custom Rules 实现地理围栏 + 时段控制
+- 多账户独立配置，互为容灾
 
 ## 项目结构
 
 ```
-workers/
+workers/                     # Worker 代码（保留不部署，可回退）
 ├── shared/
-│   ├── ip2region.js     # ip2region xdb 查询器（Worker 适配版）
-│   ├── ip-lookup.js     # IP 归属地统一封装层
-│   └── schedule.js      # 开放时段判断
-├── city-gate/           # 城市访问网关
+│   ├── ip2region.js         # ip2region xdb 查询器（Worker 适配版）
+│   ├── ip-lookup.js         # IP 归属地统一封装层
+│   └── schedule.js          # 开放时段判断
+├── city-gate/               # 账户1 配置
 │   ├── worker.js
-│   └── wrangler.toml
-└── cxapk/               # APK 下载页（Pages 托管）
+│   └── wrangler.toml        # ← 唯一配置来源（DOMAIN_CONFIG_JSON）
+├── city-gate-2/             # 账户2 配置
+│   ├── worker.js
+│   └── wrangler.toml        # ← 账户2 配置
+└── cxapk/                   # APK 下载页（Pages 托管）
     └── index.html
 scripts/
-├── sync-cname.js        # DNS CNAME 同步脚本
-└── update-ip2region.js  # ip2region xdb 更新脚本
+├── setup-saas.js            # CF for SaaS 配置（Fallback Origin + Custom Hostnames）
+├── setup-firewall.js        # WAF Custom Rules 配置（地理围栏 + 时段控制）
+├── sync-dns.js              # DNS A 记录同步（Docker 定时执行）
+├── sync-cname.js            # DNS CNAME 同步（CNAME 模式 fallback）
+├── check-cname.js           # DNS 记录检测
+├── generate-routes.js       # Worker 路由生成（回退时使用）
+├── validate-config.js       # 配置校验
+├── update-ip2region.js      # ip2region xdb 更新（回退时使用）
+└── obfuscate-cxapk.js       # Pages JS 混淆
+docker/
+├── Dockerfile               # Docker 镜像（DNS 同步容器）
+├── entrypoint.sh            # 容器入口（cron 定时同步）
+└── docker-compose.yml       # Docker Compose 配置
 ```
-
-## 地理匹配策略
-
-城市级匹配：ip2region 离线IP库精确到城市，由运营商IP段决定，精度远高于 Cloudflare GeoIP。
-
-| 策略 | 数据源 | 精度 |
-|------|--------|------|
-| 城市级匹配 | ip2region（KV+内存缓存） | 精确到城市 |
-
-ip2region 的 xdb 数据文件存储在 Cloudflare KV 中，冷启动时加载到内存，后续查询纯内存操作（~0.01ms）。
-如果 ip2region 不可用（xdb 未加载），降级使用 Cloudflare `request.cf` 的城市名。
 
 ## 域名组配置
 
-配置通过环境变量 `DOMAIN_CONFIG_JSON` 提供（见 `wrangler.toml` 的 `[vars]`），使用**域名组数组**结构：同一源站/地区规则的域名共享一份配置，无需逐个重复。
-
-```json
-[
-  {
-    "origin": "https://sg-7gj.pages.dev",
-    "cities": ["杭州", "Hangzhou"],
-    "provinces": ["浙江", "Zhejiang"],
-    "domains": ["sg.1189.dpdns.org", "sg.07170501.xyz"]
-  },
-  {
-    "origin": "https://cx-1wd.pages.dev",
-    "cities": ["ALL"],
-    "domains": ["cx.zhaozg.dpdns.org"]
-  }
-]
-```
-
-- `cities`：城市级匹配（中英文兼容），包含 `"ALL"` 时全部放行
-- `provinces`：ip2region 不可用时降级省级匹配
-- `domains`：共享以上规则的域名列表
-- `origin`：反向代理源站
-
-### zones + prefixes 格式（推荐）
-
-当前仓库采用 `zones + prefixes` 结构（见 `wrangler.toml`）：域名拆分为 zone（注册域）与 prefix（子域名前缀），运行时自动展开 `prefix.zone` 为完整域名，避免逐个重复。
+配置通过环境变量 `DOMAIN_CONFIG_JSON` 提供（见 `wrangler.toml` 的 `[vars]`），使用 `zones + groups` 结构。
 
 ```json
 {
-  "zones": ["1189.dpdns.org", "zzg.cc.cd"],
+  "zones": ["1189.dpdns.org", "zhaozg.dpdns.org"],
   "groups": [
-    { "prefix": "sg", "origin": "https://sg-f3b.pages.dev", "cities": ["ALL"] },
-    { "prefix": "bible", "origin": "https://bible-bka.pages.dev", "cities": ["杭州"] }
+    {
+      "prefix": "sg",
+      "origin": "https://sg-f3b.pages.dev",
+      "cities": ["ALL"]
+    },
+    {
+      "prefix": "bible",
+      "origin": "https://bible-2o8.pages.dev",
+      "cities": ["杭州", "Hangzhou"],
+      "provinces": ["浙江", "Zhejiang"]
+    },
+    {
+      "prefix": "books",
+      "origin": "https://books-em3.pages.dev",
+      "cities": ["ALL"],
+      "schedule": { "days": [1,2,3,4,5,6,7], "periods": ["01:00-22:00"] }
+    }
   ]
 }
 ```
+
+- `zones`：注册域列表
+- `groups`：前缀组，每个 group 展开为 `prefix.zone` 的 FQDN
+- `cities`：`["ALL"]` 全部放行，或指定城市列表
+- `provinces`：省级匹配，用于 WAF 地理围栏规则
+- `schedule`：时段控制，由 Docker 容器定时 enable/disable WAF rule 实现
+- `origin`：反向代理源站（Pages 项目地址）
 
 ### 不使用优选域名（noPreferred）
 
 `zones` 元素支持两种写法：
 
-- 字符串（默认）：使用优选域名。`sync-cname.js` 会从优选域名池为该 zone 分配一个优选域名，子域名 CNAME 指向它。
-- 对象：`{ "name": "zzg.cc.cd", "noPreferred": true }` — **不使用优选域名**。同步脚本跳过优选域名池，将该 zone 的子域名直接 CNAME 到各前缀对应的源站 `origin`（如 `sg.zzg.cc.cd → sg-f3b.pages.dev`），适用于不需要优选线路的域名。
-
-```json
-{
-  "zones": [
-    "1189.dpdns.org",
-    { "name": "zzg.cc.cd", "noPreferred": true }
-  ],
-  "groups": [
-    { "prefix": "sg", "origin": "https://sg-f3b.pages.dev", "cities": ["ALL"] }
-  ]
-}
-```
-
-> `noPreferred` 仅影响 DNS 同步（`sync-cname.js`）的 CNAME 目标选择，不影响 Worker 网关与路由生成。
-
-## 添加新域名
-
-1. 在 `wrangler.toml` 的 `DOMAIN_CONFIG_JSON` 对应分组中追加域名
-2. 在 `wrangler.toml` 中添加路由
-3. 部署即可
+- 字符串（默认）：使用优选 IP，`sync-dns.js` 分配 A 记录指向 CF 边缘优选 IP
+- 对象：`{ "name": "zzg.cc.cd", "noPreferred": true }` — 不使用优选 IP，直接 CNAME 到源站
 
 ## 部署
 
-### 自动部署（推荐）
+### CI/CD 自动部署
 
 推送 master 分支自动触发 GitHub Actions：
-- 自动更新 ip2region xdb 到 KV
-- 自动部署全部 Worker
+- **SaaS 配置**：自动创建/更新 Fallback Origin + Custom Hostnames
+- **Firewall 配置**：自动创建/更新 WAF Custom Rules（地理围栏 + 时段控制）
+- **Pages 部署**：自动部署 cxapk 下载页
 
-### 手动部署
+### 手动运行
 
 ```bash
-cd workers/city-gate
-npx wrangler deploy
+# SaaS 配置（预览）
+CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/setup-saas.js
+
+# SaaS 配置（执行）
+CLOUDFLARE_API_TOKEN=xxx node scripts/setup-saas.js
+
+# Firewall 配置（预览）
+CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/setup-firewall.js
+
+# Firewall 配置（执行）
+CLOUDFLARE_API_TOKEN=xxx node scripts/setup-firewall.js
+
+# DNS A 记录同步（预览）
+CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/sync-dns.js
+
+# DNS A 记录同步（执行）
+CLOUDFLARE_API_TOKEN=xxx node scripts/sync-dns.js
 ```
 
-### 首次部署：配置 KV
+## Docker 定时同步
 
-无需手动创建 KV namespace。`scripts/update-ip2region.js` 脚本会自动：
-1. 通过 Cloudflare API 查找名为 `city-gate-IP2REGION` 的 KV namespace
-2. 如不存在则自动创建
-3. 将 namespace id 写回 `wrangler.toml`
-4. 下载并上传最新 xdb 数据到 KV
+Docker 容器每 6 小时执行一次 `sync-dns.js`，自动更新 DNS A 记录指向最新优选 IP。
 
 ```bash
-# 一键初始化（自动创建 KV + 上传 xdb）
-CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
-  node scripts/update-ip2region.js
-```
+# 构建
+docker build -t city-gate-cron -f docker/Dockerfile .
 
-> 如果已有 KV namespace，可通过 `KV_NAMESPACE_ID` 环境变量指定，脚本会跳过创建步骤。
-
-### 更新 ip2region 数据
-
-```bash
-# 自动：检查 GitHub 最新 release 并更新
-CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
-  node scripts/update-ip2region.js
-
-# 已有 KV namespace 时指定 id
-CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=xxx \
-  KV_NAMESPACE_ID=xxx node scripts/update-ip2region.js
-
-# 指定版本
-IP2REGION_VERSION=3.5.1 CLOUDFLARE_API_TOKEN=xxx \
-  CLOUDFLARE_ACCOUNT_ID=xxx \
-  node scripts/update-ip2region.js
+# 运行
+docker run -d \
+  -e CLOUDFLARE_API_TOKEN=xxx \
+  -e CLOUDFLARE_API_TOKEN_2=xxx \
+  -v /etc/localtime:/etc/localtime:ro \
+  city-gate-cron
 ```
 
 ## GitHub Secrets
 
-| Secret | 说明 |
-|--------|------|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（需 Workers、KV、DNS、Account Settings 权限） |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账户 ID |
-| `KV_IP2REGION_NAMESPACE_ID` | (可选) ip2region KV namespace ID，不配置则脚本自动创建 |
+| Secret | 说明 | 是否必须 |
+|--------|------|---------|
+| `CLOUDFLARE_API_TOKEN` | 账户1 API Token（需 Zone:Edit + DNS:Edit + SSL/Certs:Edit + WAF:Edit） | 是 |
+| `CLOUDFLARE_API_TOKEN_2` | 账户2 API Token（同上权限） | 是 |
+| `CLOUDFLARE_ACCOUNT_ID` | 账户1 Account ID（Pages 部署用） | 是 |
+| `CLOUDFLARE_ACCOUNT_ID_2` | 账户2 Account ID | 否 |
 
-## DNS CNAME 同步
+> 以下 Secrets 仅 Worker 回退模式需要（当前架构不使用）：
+> - `KV_IP2REGION_NAMESPACE_ID` / `KV_IP2REGION_NAMESPACE_ID_2`
 
-`scripts/sync-cname.js` 脚本自动管理 Cloudflare DNS 中的 CNAME 记录。
+## 回退方案
 
-### 本地运行
+如 SaaS 方案出问题，可回退到 Worker 模式：
 
-```bash
-# 预览模式
-CLOUDFLARE_API_TOKEN=xxx DRY_RUN=1 node scripts/sync-cname.js
+1. CI 重新部署 Worker（代码保留在 `workers/` 目录）
+2. `sync-dns.js` 改为 `sync-cname.js`（CNAME 模式）
+3. 删除 SaaS Custom Hostnames
+4. 恢复 Worker 路由
 
-# 实际执行
-CLOUDFLARE_API_TOKEN=xxx node scripts/sync-cname.js
-```
+回退时间预估：< 10 分钟。
 
 ## 环境变量
 
-| 变量 | Worker | 说明 |
-|------|--------|------|
-| `DOMAIN_CONFIG_JSON` | city-gate | JSON 字符串（域名组数组），唯一配置来源，格式见 wrangler.toml |
-| `PAGES_ORIGIN` | city-gate | 兜底源站地址 |
+| 变量 | 说明 |
+|------|------|
+| `CLOUDFLARE_API_TOKEN` | 账户1 API Token |
+| `CLOUDFLARE_API_TOKEN_2` | 账户2 API Token |
+| `DRY_RUN` | 1=仅预览不执行 |
+| `ZONE_CONFIG_JSON` | 覆盖 wrangler.toml 配置 |
+| `IP_PER_ZONE` | 每 zone 分配的 A 记录 IP 数量（默认 2） |
+| `IP_DEDUP_PREFIX` | IP 去重前缀长度（默认 /24） |

@@ -9,8 +9,11 @@ RUN apk add --no-cache dcron tzdata ca-certificates && \
 WORKDIR /app
 
 # ── 仅拷贝脚本所需文件 ──
+# workers/ 不再需要（去 Worker 化重构，容器仅用于 DNS A 记录同步）
+# wrangler.toml 仍需保留以供 sync-dns.js 读取配置
 COPY scripts/   ./scripts/
-COPY workers/   ./workers/
+COPY workers/city-gate/wrangler.toml     ./workers/city-gate/wrangler.toml
+COPY workers/city-gate-2/wrangler.toml  ./workers/city-gate-2/wrangler.toml
 COPY package.json ./
 
 # ── entrypoint ──

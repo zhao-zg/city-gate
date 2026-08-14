@@ -949,6 +949,12 @@ if (require.main === module) {
 module.exports = {
   autoDetectZoneMap,
   buildZoneMapFromConfig,
+  parseDomainConfig,
+  parseWorkerName,
+  stripProtocol,
+  zoneNameOf,
+  isNoPreferredZone,
+  WORKER_TOKEN_KEYS,
   resolveIps,
   is1034Ip,
   isChallengePage,
@@ -962,5 +968,7 @@ module.exports = {
   buildAssignmentPlan,
   getZoneId,
   getDnsRecords,
+  getToken,
+  cfFetch,
   CNAME_POOL,
 };
