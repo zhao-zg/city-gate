@@ -47,7 +47,8 @@ DOMAIN_CONFIG_JSON = """
     },
     {
       "prefix": "bible",
-      "origin": "https://bible-bka.pages.dev"
+      "origin": "https://bible-bka.pages.dev",
+      "cities": ["ALL"]
     },
     {
       "prefix": "cx",
