@@ -968,6 +968,8 @@ module.exports = {
   buildAssignmentPlan,
   getZoneId,
   getDnsRecords,
+  deleteDnsRecord,
+  createCnameRecord,
   getToken,
   cfFetch,
   CNAME_POOL,
