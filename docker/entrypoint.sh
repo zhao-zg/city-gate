@@ -42,7 +42,7 @@ run_script() {
   echo ""
   echo "════════════════════════════════════════════════════════════"
   echo "  city-gate-cron  $(date '+%Y-%m-%d %H:%M:%S %Z')"
-  echo "  模式: $mode  |  DRY_RUN: ${DRY_RUN:-0}"
+  echo "  模式: $mode (同步 DNS + 检验 + 测速)  |  DRY_RUN: ${DRY_RUN:-0}"
   echo "════════════════════════════════════════════════════════════"
   echo ""
 

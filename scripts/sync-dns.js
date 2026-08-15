@@ -8,7 +8,7 @@
  *   Worker Route 匹配域名 → 透明转发到 *.pages.dev
  *
  * 三大功能：
- *   1. 同步 DNS — 从优选域名池解析 IP，验证 1034 + 挑战页，/24 去重，
+ *   1. 同步 DNS — 从优选域名池解析 IP，验证 1034 + 挑战页，按 IP_DEDUP_PREFIX 去重，
  *                 延迟排序，分配 A 记录，写入 Cloudflare DNS
  *   2. 检验 DNS — 对各 FQDN 做 HTTPS 连通性检测（1014/522/挑战页识别）
  *   3. 测速     — 对每个 zone 的 A 记录 IP 做下载测速，
@@ -19,7 +19,7 @@
  *   CLOUDFLARE_API_TOKEN_2 — 账户2 Token（可选）
  *   DRY_RUN（可选）        — 设为 1 则只预览不执行修改
  *   IP_PER_ZONE（可选）    — 每 zone 分配几个 IP（默认 2）
- *   IP_DEDUP_PREFIX（可选）— IP 去重前缀长度（默认 24，即 /24）
+ *   IP_DEDUP_PREFIX（可选）— IP 去重前缀长度（默认 32 = 仅去重完全相同的 IP）
  *   MIN_SPEED_KBPS（可选） — 最低速度 KB/s（默认 500）
  *   SPEED_TEST_SEC（可选） — 测速时长秒数（默认 2）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
@@ -35,7 +35,7 @@ const sc = require('./sync-cname');
 
 // ── 配置 ─────────────────────────────────────────────
 const IP_PER_ZONE = parseInt(process.env.IP_PER_ZONE || '2', 10);
-const IP_DEDUP_PREFIX = parseInt(process.env.IP_DEDUP_PREFIX || '24', 10);
+const IP_DEDUP_PREFIX = parseInt(process.env.IP_DEDUP_PREFIX || '32', 10);
 const MIN_SPEED_KBPS = parseInt(process.env.MIN_SPEED_KBPS || '500', 10);
 const SPEED_TEST_SEC = parseInt(process.env.SPEED_TEST_SEC || '2', 10);
 
@@ -83,10 +83,12 @@ function ipPrefix(ip, prefixLen) {
 }
 
 /**
- * 同前缀去重：同 /24 段只保留延迟最低的 IP
- * 避免 CF 边缘 IP 集中在同一段，提高容灾
+ * 同前缀去重（prefixLen=0 时不去重，直接按延迟排序）
  */
 function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
+  if (prefixLen === 0) {
+    return [...ipLatencyList].sort((a, b) => a.latency - b.latency);
+  }
   const byPrefix = new Map();
 
   for (const { ip, latency } of ipLatencyList) {
@@ -105,61 +107,89 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 
 /**
  * 对指定 IP 做下载速度测试
- * 通过 IP 直连 + SNI/Host 指定域名，下载一段时间后计算速度
- * 返回 { speed_kbps, downloaded, duration_ms } 或 null（失败）
+ * 通过 IP 直连 + SNI/Host 指定域名，在测速时长内持续下载并计算速度
+ * 单个请求结束时自动发起新请求（keep-alive 复用连接），避免小页面导致测速过早结束
+ * 返回 { speed_kbps, downloaded, duration_ms, requests } 或 null（失败）
  */
 function testDownloadSpeed(ip, testHost, testSec) {
   return new Promise((resolve) => {
     const start = Date.now();
-    const timeout = (testSec + 3) * 1000; // 额外 3s 余量
+    const durationMs = testSec * 1000;
+    const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量
     let settled = false;
-    let downloaded = 0;
+    let totalDownloaded = 0;
+    let requestCount = 0;
+    let activeRequests = 0;
 
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
+    // keep-alive agent 复用 TLS 连接，避免反复握手
+    const agent = new https.Agent({
+      keepAlive: true,
+      maxSockets: 2,
+      rejectUnauthorized: false,
+    });
+
+    const cleanup = () => {
+      clearTimeout(testTimer);
+      clearTimeout(hardTimer);
+      agent.destroy();
     };
 
-    const req = https.request({
-      host: ip,
-      servername: testHost,
-      headers: { Host: testHost },
-      path: '/',
-      method: 'GET',
-      timeout,
-      rejectUnauthorized: false,
-    }, (res) => {
-      // 收集数据，按时间截断
-      const timer = setTimeout(() => {
-        res.destroy();
-        const duration = (Date.now() - start) / 1000;
-        const speed_kbps = duration > 0 ? Math.round((downloaded / 1024) / duration) : 0;
-        finish({ speed_kbps, downloaded, duration_ms: Date.now() - start });
-      }, testSec * 1000);
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const elapsedSec = Math.max((Date.now() - start) / 1000, 0.001);
+      const speed_kbps = Math.round((totalDownloaded / 1024) / elapsedSec);
+      resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start, requests: requestCount });
+    };
 
-      res.on('data', (chunk) => {
-        downloaded += chunk.length;
+    const testTimer = setTimeout(finish, durationMs);
+    const hardTimer = setTimeout(finish, timeoutMs);
+
+    function makeRequest() {
+      if (settled) return;
+      if (Date.now() - start >= durationMs) {
+        if (activeRequests === 0) finish();
+        return;
+      }
+
+      activeRequests++;
+      requestCount++;
+
+      const req = https.request({
+        host: ip,
+        servername: testHost,
+        headers: { Host: testHost },
+        path: '/',
+        method: 'GET',
+        timeout: timeoutMs,
+        agent,
+        rejectUnauthorized: false,
+      }, (res) => {
+        res.on('data', (chunk) => {
+          if (!settled) totalDownloaded += chunk.length;
+        });
+        res.on('end', () => {
+          activeRequests--;
+          if (!settled) makeRequest(); // 小页面下载完，继续发新请求
+        });
+        res.on('error', () => {
+          activeRequests--;
+          if (!settled) makeRequest();
+        });
       });
 
-      res.on('end', () => {
-        clearTimeout(timer);
-        const duration = (Date.now() - start) / 1000;
-        const speed_kbps = duration > 0 ? Math.round((downloaded / 1024) / duration) : 0;
-        finish({ speed_kbps, downloaded, duration_ms: Date.now() - start });
+      req.on('timeout', () => { req.destroy(); });
+      req.on('error', () => {
+        activeRequests--;
+        if (!settled) setTimeout(makeRequest, 100);
       });
-    });
+      req.end();
+    }
 
-    req.on('timeout', () => {
-      req.destroy();
-      finish(null);
-    });
-
-    req.on('error', () => {
-      finish(null);
-    });
-
-    req.end();
+    // 2 个并发请求提高吞吐量测量准确性
+    makeRequest();
+    makeRequest();
   });
 }
 
@@ -213,14 +243,15 @@ function checkConnectivity(fqdn) {
 
 /**
  * 从优选域名池收集所有可用 IP，检测质量后排序
- * 池内 IP 经 1034 验证 + /24 去重后数量足够时跳过 cfIpTop20，
- * 不足时才拉取远程 Top20 补充候选。
+ * 池内 IP 经 1034 验证后按延迟排序（默认不去重），
+ * 数量足够时跳过 cfIpTop20，不足时才拉取远程 Top20 补充候选。
  * 返回按延迟排序的可用 IP 列表 [{ ip, latency, source }]
  */
 async function buildIpPool(testHost, needCount) {
   console.log('\n── IP 池构建 ──');
   console.log(`  测试 Host: ${testHost}`);
-  console.log(`  去重前缀: /${IP_DEDUP_PREFIX}`);
+  const dedupDesc = IP_DEDUP_PREFIX > 0 ? `/${IP_DEDUP_PREFIX} 去重` : '不去重';
+  console.log(`  去重: ${dedupDesc}`);
   console.log(`  每 zone: ${IP_PER_ZONE} 个 IP，共需 ${needCount} 个\n`);
 
   // 第1步：从 CNAME_POOL 收集 IP
@@ -273,8 +304,8 @@ async function buildIpPool(testHost, needCount) {
 
   console.log(`\n  检测结果: 可用 ${good.length} / 不可用 ${bad.length}`);
 
-  // 第3步：同 /24 去重，按延迟排序
-  console.log(`\n  [3] 同 /${IP_DEDUP_PREFIX} 去重...`);
+  // 第3步：按延迟排序（prefixLen=0 时不去重，保留全部）
+  console.log(`\n  [3] ${dedupDesc}...`);
   let deduped = dedupIps(good);
   console.log(`  去重后: ${deduped.length} 个 IP（按延迟排序）`);
   for (const { ip, latency } of deduped.slice(0, 20)) {
@@ -585,11 +616,11 @@ async function main() {
   }
 
   // ═══════════════════════════════════════════════════
-  // 第一步：构建 IP 池（1034 验证 + 延迟排序 + /24 去重）
+  // 第一步：构建 IP 池（1034 验证 + 延迟排序 + 去重）
   // ═══════════════════════════════════════════════════
 
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  第一步：构建 IP 池（1034 + 延迟 + /24 去重）');
+  console.log(`  第一步：构建 IP 池（1034 + 延迟 + /${IP_DEDUP_PREFIX} 去重）`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   const needCount = poolZones.length * IP_PER_ZONE;

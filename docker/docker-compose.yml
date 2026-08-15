@@ -23,7 +23,7 @@ services:
       - NOTIFY_TOKEN=${NOTIFY_TOKEN:-}
       # ── A 记录配置 ──
       - IP_PER_ZONE=${IP_PER_ZONE:-2}
-      - IP_DEDUP_PREFIX=${IP_DEDUP_PREFIX:-24}
+      - IP_DEDUP_PREFIX=${IP_DEDUP_PREFIX:-32}
       # ── 测速配置 ──
       - MIN_SPEED_KBPS=${MIN_SPEED_KBPS:-500}
       - SPEED_TEST_SEC=${SPEED_TEST_SEC:-2}
