@@ -8,10 +8,12 @@
  * 格式：
  *   { "groups": [{ "prefix", "pages_project", "pages_domain?", "origin?" }, ...], "zones": [...] }
  *
- * - pages_project: Pages 项目名称，默认 origin 为 {pages_project}.pages.dev
- * - pages_domain:  Pages 项目的实际 *.pages.dev 域名（如 "cx-1wd.pages.dev"），
- *                  当项目名被占用导致域名带后缀时使用，覆盖默认拼接
- * - origin: 非 Pages 源站 URL（如 "https://answer.07170501.xyz"），与 pages_project 互斥
+ * - pages_domain: Pages 项目的实际 *.pages.dev 域名（由 resolve-pages.js 在 CI 时
+ *                  通过 API 自动查询注入，如 "sg-f3b.pages.dev"、"cx-1wd.pages.dev"）
+ * - origin:       非 Pages 源站 URL（如 "https://answer.07170501.xyz"），与 pages_domain 互斥
+ *
+ * 注意：pages_project 仅作标识符（不用于拼接域名），实际转发目标由 pages_domain 决定。
+ *       如果 pages_domain 缺失，该 group 将无法转发（返回 502）。
  *
  * 运行时自动展开 prefix.zone 为完整域名，匹配后透明转发。
  */
@@ -55,22 +57,23 @@ export default {
         const domain = `${group.prefix}.${zoneName}`;
 
         // 确定转发目标：
-        //   pages_domain（显式指定）> pages_project + ".pages.dev"（默认拼接）> origin（外部源站）
+        //   pages_domain（CI 自动注入的真实域名）> origin（外部源站）
         let target;
         let isPages = false;
 
         if (group.pages_domain) {
-          // 显式指定实际 pages.dev 域名（如 cx-1wd.pages.dev）
+          // CI 通过 API 查询的真实 *.pages.dev 域名
           target = group.pages_domain;
-          isPages = true;
-        } else if (group.pages_project) {
-          // 默认拼接：项目名.pages.dev（大多数情况可用）
-          target = `${group.pages_project}.pages.dev`;
           isPages = true;
         } else if (group.origin) {
           // 非 Pages 源站
           target = group.origin;
           isPages = false;
+        } else if (group.pages_project) {
+          // pages_project 仅作标识，不用于拼接域名
+          // 到达这里说明 resolve-pages.js 未成功运行或该 Pages 项目不存在
+          console.error(`group "${group.prefix}" 有 pages_project 但无 pages_domain，跳过`);
+          continue;
         }
 
         if (target) {
