@@ -234,13 +234,18 @@ async function ensureOriginRules(zoneId, zoneName, pagesFqdnMap, tokenKey) {
   try {
     existingRuleset = await listOriginRules(zoneId, tokenKey);
   } catch (e) {
-    if (e.message.includes('not authorized') || e.message.includes('403')) {
+    // "could not find entrypoint ruleset" = zone 下还没有 Origin Rule，视为空
+    if (e.message.includes('could not find entrypoint') || e.message.includes('not found')) {
+      console.log(`    无现有 Origin Rules（首次创建）`);
+      existingRuleset = null;
+    } else if (e.message.includes('not authorized') || e.message.includes('403')) {
       console.error(`    ✗ Origin Rules API 权限不足: ${e.message}`);
-      console.error(`    ℹ 请在 Cloudflare Dashboard 更新 API Token 权限，添加 "Account Rulesets: Edit"`);
+      console.error(`    ℹ 请在 Cloudflare Dashboard 更新 API Token 权限，添加 "Zone Rulesets: Edit"`);
       return { created: 0, errors: 1, authError: true };
+    } else {
+      console.error(`    ✗ 获取现有 Origin Rules 失败: ${e.message}`);
+      return { created: 0, errors: 1 };
     }
-    console.error(`    ✗ 获取现有 Origin Rules 失败: ${e.message}`);
-    return { created: 0, errors: 1 };
   }
 
   // 合并：保留非本项目创建的规则，替换本项目规则
