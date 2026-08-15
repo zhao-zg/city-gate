@@ -21,7 +21,7 @@
  *   IP_PER_ZONE（可选）    — 每 zone 分配几个 IP（默认 2）
  *   IP_DEDUP_PREFIX（可选）— IP 去重前缀长度（默认 24，即 /24）
  *   MIN_SPEED_KBPS（可选） — 最低速度 KB/s（默认 500）
- *   SPEED_TEST_SEC（可选） — 测速时长秒数（默认 5）
+ *   SPEED_TEST_SEC（可选） — 测速时长秒数（默认 2）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
