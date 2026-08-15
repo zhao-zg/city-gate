@@ -161,7 +161,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
             try {
               await deletePagesDomain(accountId, projectName, d.id, pagesTokenKey);
             } catch (e) {
-              if (e.message.includes('does not exist') || e.message.includes('not found')) {
+              if (e.message.includes('does not exist') || e.message.includes('not found') || e.message.includes('not exist')) {
                 console.log(`    Pages 域名已不存在 → 忽略`);
               } else {
                 throw e;
@@ -208,8 +208,13 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
       console.log(`    无 Fallback Origin`);
     }
   } catch (e) {
-    console.error(`    ✗ 清理 Fallback Origin 失败: ${e.message}`);
-    errors++;
+    // Fallback Origin 可能已被删除（Resource not found），不算错误
+    if (e.message.includes('not found') || e.message.includes('Resource not found')) {
+      console.log(`    Fallback Origin 已不存在 → 忽略`);
+    } else {
+      console.error(`    ✗ 清理 Fallback Origin 失败: ${e.message}`);
+      errors++;
+    }
   }
 
   // ── Step 4: 清理 Fallback DNS 记录（带重试，CF API 可能延迟释放引用） ──

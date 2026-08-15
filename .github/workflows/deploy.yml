@@ -85,6 +85,7 @@ jobs:
         with:
           node-version: '24'
       - name: 清理旧 SaaS 资源（账户1）
+        continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
@@ -123,6 +124,7 @@ jobs:
         with:
           node-version: '24'
       - name: 清理旧 SaaS 资源（账户2）
+        continue-on-error: true
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
