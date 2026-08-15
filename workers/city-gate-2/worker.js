@@ -1,183 +1,117 @@
 /**
- * Cloudflare Worker — IP访问限制网关（多域名版）
+ * Cloudflare Worker — 透明传输网关（多域名版）
  *
- * 一个 Worker 即可服务多个域名，每个域名独立配置允许的地区和源站。
- * 域名配置全部来自环境变量 DOMAIN_CONFIG_JSON（域名组数组，见 wrangler.toml [vars]），
- * 新增域名只需在 JSON 对应分组中加一条，再在 wrangler.toml 加一条路由。
+ * 将自定义域名请求透明转发到对应的 Pages 项目（*.pages.dev）或外部源站。
+ * 不做任何业务逻辑（无城市限制、无 IP 判断、无时间调度）。
  *
- * 地理匹配策略（IPv4/IPv6 均支持）：
- * - ip2region 可用时：城市级精确匹配（如 杭州）
- * - ip2region 不可用时：降级到 CF 省级代码匹配（如 浙江）
+ * 域名配置来自环境变量 DOMAIN_CONFIG_JSON（见 wrangler.toml [vars]），
+ * 格式：
+ *   { "groups": [{ "prefix", "pages_project", "pages_domain?", "origin?" }, ...], "zones": [...] }
+ *
+ * - pages_project: Pages 项目名称，默认 origin 为 {pages_project}.pages.dev
+ * - pages_domain:  Pages 项目的实际 *.pages.dev 域名（如 "cx-1wd.pages.dev"），
+ *                  当项目名被占用导致域名带后缀时使用，覆盖默认拼接
+ * - origin: 非 Pages 源站 URL（如 "https://answer.07170501.xyz"），与 pages_project 互斥
+ *
+ * 运行时自动展开 prefix.zone 为完整域名，匹配后透明转发。
  */
-
-import { initIpLookup, lookupIP } from '../shared/ip-lookup.js';
-import { isInOpenSchedule } from '../shared/schedule.js';
-
-// ── Worker 入口 ───────────────────────────────────────
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const hostname = url.hostname;
 
-    // 0. 初始化 ip2region（从 KV 加载 xdb，冷启动仅一次）
-    if (env.IP2REGION) {
-      await initIpLookup(env.IP2REGION);
-    }
-
-    // 0.5 CORS 预检（OPTIONS）— 全局拦截，直接返回 CORS 头
-    //    跨域 fetch 先发 OPTIONS 预检，必须返回正确的 CORS 头才能通过
+    // 0. CORS 预检（OPTIONS）
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
         headers: {
           'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+          'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
           'Access-Control-Allow-Headers': request.headers.get('Access-Control-Request-Headers') || '*',
           'Access-Control-Max-Age': '86400',
         },
       });
     }
 
-    // 1. 加载配置：全部来自环境变量 DOMAIN_CONFIG_JSON
-    //    支持三种结构：
-    //    - zones + prefixes：{ zones: [...], groups: [{ prefix, origin, cities, provinces }, ...] }
-    //      运行时自动展开 prefix.zone 为完整域名（推荐，简洁免重复）
-    //    - 域名组数组：[{ origin, cities, provinces, domains: [...] }, ...]（旧格式，仍兼容）
-    //    - 域名映射：{ "域名": { origin, cities, provinces }, ... }（旧格式，仍兼容）
-    //    缺失或解析失败时返回 500，避免网关静默失效放行所有请求
+    // 1. 加载配置
     let config;
     try {
       config = JSON.parse(env.DOMAIN_CONFIG_JSON);
     } catch {
-      return new Response('网关配置错误：环境变量 DOMAIN_CONFIG_JSON 缺失或不是合法 JSON', {
-        status: 500,
-      });
+      return new Response('网关配置错误：DOMAIN_CONFIG_JSON 缺失或非法', { status: 500 });
     }
 
-    // zones + prefixes 结构 → 展开成 域名 → 配置 映射
-    if (config.zones && Array.isArray(config.groups)) {
-      const domainMap = {};
-      for (const group of config.groups) {
-        const cities = group.cities || [];
-        const provinces = group.provinces || [];
-        const zones = group.zones || config.zones; // 组级可覆盖 zone 列表
-        for (const zone of zones) {
-          // zones 元素兼容字符串或对象 { name, noPreferred }（noPreferred 仅影响 DNS 同步，不影响网关）
-          const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
-          if (!zoneName) continue;
-          const domain = `${group.prefix}.${zoneName}`;
-          domainMap[domain] = { cities, provinces, origin: group.origin, schedule: group.schedule || null };
+    // 2. 展开 zones + groups → hostname → target 映射
+    const domainMap = {};
+    const groups = config.groups || [];
+    const zones = config.zones || [];
+
+    for (const group of groups) {
+      const groupZones = group.zones || zones;
+      for (const zone of groupZones) {
+        const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
+        if (!zoneName) continue;
+        const domain = `${group.prefix}.${zoneName}`;
+
+        // 确定转发目标：
+        //   pages_domain（显式指定）> pages_project + ".pages.dev"（默认拼接）> origin（外部源站）
+        let target;
+        let isPages = false;
+
+        if (group.pages_domain) {
+          // 显式指定实际 pages.dev 域名（如 cx-1wd.pages.dev）
+          target = group.pages_domain;
+          isPages = true;
+        } else if (group.pages_project) {
+          // 默认拼接：项目名.pages.dev（大多数情况可用）
+          target = `${group.pages_project}.pages.dev`;
+          isPages = true;
+        } else if (group.origin) {
+          // 非 Pages 源站
+          target = group.origin;
+          isPages = false;
+        }
+
+        if (target) {
+          domainMap[domain] = { target, isPages };
         }
       }
-      config = domainMap;
-    }
-    // 域名组数组结构 → 展开成 域名 → 配置 映射（旧格式兼容）
-    else if (Array.isArray(config)) {
-      const domainMap = {};
-      for (const group of config) {
-        const cities = group.cities || [];
-        const provinces = group.provinces || [];
-        for (const domain of group.domains || []) {
-          domainMap[domain] = { cities, provinces, origin: group.origin, schedule: group.schedule || null };
-        }
-      }
-      config = domainMap;
     }
 
-    // 2. 查找当前域名的地理配置和源站
-    const domainCfg = config[hostname];
-    if (!domainCfg) {
-      return new Response('Forbidden', { status: 403 });
-    }
-    const allowedCities = domainCfg.cities || [];
-    const allowedProvinces = domainCfg.provinces || [];
-    const origin = domainCfg.origin || env.PAGES_ORIGIN;
-
-    // 2.5 schedule 时间判断（优先于地理围栏）
-    if (domainCfg.schedule) {
-      if (!isInOpenSchedule(domainCfg.schedule)) {
-        return new Response('Forbidden', { status: 403 });
-      }
+    // 3. 查找当前域名的转发目标
+    const route = domainMap[hostname];
+    if (!route) {
+      return new Response('Not Found', { status: 404 });
     }
 
-    // 3. cities 包含 ALL 时全部放行
-    if (allowedCities.some(c => c.toUpperCase() === 'ALL')) {
-      return proxyRequest(request, url, origin);
-    }
+    // 4. 透明转发
+    const originPrefix = route.isPages ? 'https://' : '';
+    const target = `${originPrefix}${route.target}${url.pathname}${url.search}`;
 
-    // 4. 配置了 cities 但走完地理判断之前，无需额外判断
+    const headers = new Headers(request.headers);
+    headers.set('Host', new URL(target).host);
+    headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
+    headers.delete('CF-Connecting-IP');
+    headers.delete('CF-IPCountry');
+    headers.delete('CF-Ray');
+    headers.delete('CF-Visitor');
 
-    // 5. IP 地理判断
-    // 优先使用可信 Worker 传递的原始客户端 IP（X-Original-IP + X-Gate-Key 校验）
-    const cf = request.cf || {};
-    const gateKey = request.headers.get('X-Gate-Key') || '';
-    const originalIP = request.headers.get('X-Original-IP') || '';
-    const trustedKey = env.GATE_KEY || '';
+    const response = await fetch(target, {
+      method: request.method,
+      headers,
+      body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+      redirect: 'manual',
+    });
 
-    // 只有密钥匹配时才信任 X-Original-IP（防伪造）
-    const clientIP = (gateKey && trustedKey && gateKey === trustedKey && originalIP)
-      ? originalIP
-      : (request.headers.get('CF-Connecting-IP') || '');
+    const respHeaders = new Headers(response.headers);
+    respHeaders.delete('x-robots-tag');
+    respHeaders.set('Access-Control-Allow-Origin', '*');
 
-    const loc = lookupIP(clientIP, cf);
-
-    let isAllowed = false;
-    let matchLevel = '';
-
-    if (loc.source === 'ip2region' && loc.city) {
-      // ip2region 城市级精确匹配（IPv4/IPv6 均支持）
-      isAllowed = allowedCities.some(
-        c => loc.city.toLowerCase() === c.toLowerCase()
-      );
-      if (isAllowed) matchLevel = 'city';
-    }
-
-    if (!isAllowed && loc.province) {
-      // ip2region 不可用时降级到省级匹配（CF 的 region 省级代码可靠）
-      isAllowed = allowedProvinces.some(
-        p => loc.province.toLowerCase() === p.toLowerCase()
-      );
-      if (isAllowed) matchLevel = 'province';
-    }
-
-    // 6. 非允许地区返回 403
-    if (!isAllowed) {
-      return new Response('Forbidden', { status: 403 });
-    }
-
-    // 7. 允许地区：反向代理到源站
-    return proxyRequest(request, url, origin);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: respHeaders,
+    });
   },
 };
-
-// ── 反向代理 ──────────────────────────────────────────
-
-async function proxyRequest(request, url, origin) {
-  const targetUrl = origin + url.pathname + url.search;
-
-  const headers = new Headers(request.headers);
-  headers.set('Host', new URL(origin).host);
-  headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
-  headers.delete('CF-Connecting-IP');
-  headers.delete('CF-IPCountry');
-  headers.delete('CF-Ray');
-  headers.delete('CF-Visitor');
-
-  const response = await fetch(targetUrl, {
-    method: request.method,
-    headers,
-    body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
-    redirect: 'manual',
-  });
-
-  const respHeaders = new Headers(response.headers);
-  respHeaders.delete('x-robots-tag');
-  respHeaders.set('Access-Control-Allow-Origin', '*');
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: respHeaders,
-  });
-}

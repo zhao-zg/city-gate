@@ -31,7 +31,7 @@ run_script() {
       script="scripts/sync-dns.js"
       ;;
     check)
-      script="scripts/check-cname.js"
+      script="scripts/check-dns.js"
       ;;
     *)
       echo "[ERROR] 未知 RUN_MODE: $mode（支持: sync / check）"

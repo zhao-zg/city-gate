@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * CF for SaaS 资源清理脚本（o-{prefix} 回源模式）
+ * SaaS 旧资源清理脚本
  *
- * 清理所有由 setup-saas.js 创建的资源：
- *   1. Pages 自定义域名（o-{prefix} 绑定到 Pages 项目的域名）
- *   2. Custom Hostnames
- *   3. Fallback Origin
- *   4. Fallback Origin DNS 记录
- *   5. o-{prefix} 的 DNS 记录（CNAME → pages.dev）
- *   6. {prefix} 的 DNS 记录（CNAME → o-{prefix}）
+ * 清理所有旧 SaaS 架构（o-{prefix} 回源模式）创建的资源：
+ *   1. Custom Hostnames
+ *   2. Fallback Origin
+ *   3. Fallback Origin DNS 记录（o-fallback A 192.0.2.1）
+ *   4. o-{prefix} DNS 记录（CNAME → pages.dev）
+ *   5. o-{prefix} Pages 自定义域名
+ *   6. {prefix} 旧 CNAME 记录（CNAME → o-{prefix}）
+ *
+ * 清理后这些 FQDN 的 DNS 记录将被 setup-saas.js 重新创建为
+ * A 记录指向优选 IP（Worker 透明传输模式）。
  *
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 账户1 Token
@@ -18,10 +21,10 @@
  */
 
 const sc = require('./sync-cname');
-const saas = require('./setup-saas');
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 const FALLBACK_PREFIX = 'o-fallback';
+const ORIGIN_PREFIX = 'o-';
 const dryRun = process.env.DRY_RUN === '1';
 
 function sleep(ms) {
@@ -52,8 +55,8 @@ async function cfApi(path, options = {}) {
 
 // ── DNS 操作 ─────────────────────────────────────
 
-async function getDnsRecord(zoneId, name, type, tokenKey) {
-  const json = await cfApi(`/zones/${zoneId}/dns_records?name=${name}&type=${type}`, { tokenKey });
+async function getDnsRecords(zoneId, name, tokenKey) {
+  const json = await cfApi(`/zones/${zoneId}/dns_records?name=${name}`, { tokenKey });
   return json.result || [];
 }
 
@@ -95,17 +98,6 @@ async function deleteCustomHostname(zoneId, chId, tokenKey) {
 
 // ── Pages 域名 ────────────────────────────────
 
-async function listPagesDomains(accountId, projectName, tokenKey) {
-  const json = await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains`, { tokenKey });
-  return json.result || [];
-}
-
-async function deletePagesDomain(accountId, projectName, domainId, tokenKey) {
-  await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains/${domainId}`, { method: 'DELETE', tokenKey });
-}
-
-// ── 账户信息 ──────────────────────────────────
-
 const accountIdCache = {};
 
 async function getAccountId(tokenKey) {
@@ -118,9 +110,45 @@ async function getAccountId(tokenKey) {
   return null;
 }
 
+async function listPagesDomains(accountId, projectName, tokenKey) {
+  const json = await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains`, { tokenKey });
+  return json.result || [];
+}
+
+async function deletePagesDomain(accountId, projectName, domainId, tokenKey) {
+  await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains/${domainId}`, { method: 'DELETE', tokenKey });
+}
+
+// ── 从 wrangler.toml 提取 pages_project 列表 ──
+
+function getPagesProjects() {
+  const fs = require('fs');
+  const path = require('path');
+  const workersDir = path.join(__dirname, '..', 'workers');
+  const projects = new Map(); // projectName → tokenKey
+
+  const dirs = fs.readdirSync(workersDir)
+    .filter(name => fs.existsSync(path.join(workersDir, name, 'wrangler.toml')));
+
+  for (const dir of dirs) {
+    const tomlText = fs.readFileSync(path.join(workersDir, dir, 'wrangler.toml'), 'utf8');
+    const config = sc.parseDomainConfig(tomlText);
+    if (!config || !config.groups) continue;
+    const workerName = sc.parseWorkerName(tomlText) || dir;
+    const tokenKey = sc.WORKER_TOKEN_KEYS[workerName] || 'default';
+    for (const group of config.groups) {
+      if (group.pages_project) {
+        projects.set(group.pages_project, tokenKey);
+      }
+    }
+  }
+
+  return projects;
+}
+
 // ── 主逻辑 ───────────────────────────────────
 
-async function cleanZone(zoneName, tokenKey, fqdns) {
+async function cleanZone(zoneName, tokenKey) {
   console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey}) ━━━`);
 
   let zoneId;
@@ -132,67 +160,17 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   }
 
   let errors = 0;
-  const pagesFqdnList = fqdns.filter(f => f.isPages);
 
-  // ── Step 1: 清理 Pages 自定义域名（o-{prefix} 绑定到 Pages 的域名） ──
-  console.log(`\n  ── Step 1: Pages 自定义域名（o-{prefix}） ──`);
-
-  const pagesProjectSet = new Set();
-  for (const f of pagesFqdnList) {
-    try {
-      const pagesInfo = await saas.findPagesProject(f.tokenKey, f.pagesProject);
-      if (pagesInfo) {
-        const key = `${pagesInfo.accountId}|${pagesInfo.projectName}|${pagesInfo.tokenKey}`;
-        pagesProjectSet.add(key);
-      }
-    } catch {
-      // 忽略
-    }
-  }
-
-  for (const key of pagesProjectSet) {
-    const [accountId, projectName, pagesTokenKey] = key.split('|');
-    try {
-      const domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
-      for (const d of domains) {
-        // 新架构：o-{prefix} 域名是回源必需的，不应在 cleanup 中删除
-        // 只清理旧的直接绑定（兼容旧架构残留：域名直接是 {prefix}.{zone} 格式）
-        const isOldDirectBind = pagesFqdnList.some(f => f.fqdn === d.name);
-        if (isOldDirectBind) {
-          console.log(`    删除 Pages 域名: ${d.name} (project: ${projectName}, status: ${d.status})`);
-          if (!dryRun) {
-            try {
-              await deletePagesDomain(accountId, projectName, d.id, pagesTokenKey);
-            } catch (e) {
-              if (e.message.includes('does not exist') || e.message.includes('not found') || e.message.includes('not exist')) {
-                console.log(`    Pages 域名已不存在 → 忽略`);
-              } else {
-                throw e;
-              }
-            }
-          }
-        } else if (d.name.startsWith(saas.ORIGIN_PREFIX)) {
-          console.log(`    跳过 o- 前缀域名: ${d.name}（新架构回源必需）`);
-        }
-      }
-    } catch (e) {
-      console.error(`    ✗ 清理 Pages 域名失败: ${e.message}`);
-      errors++;
-    }
-  }
-
-  // ── Step 2: 清理 Custom Hostnames ──
-  console.log(`\n  ── Step 2: Custom Hostnames ──`);
+  // Step 1: Custom Hostnames
+  console.log(`\n  ── Step 1: Custom Hostnames ──`);
   try {
     const chs = await listCustomHostnames(zoneId, tokenKey);
     if (chs.length === 0) {
       console.log(`    无 Custom Hostnames`);
     } else {
       for (const ch of chs) {
-        console.log(`    删除 Custom Hostname: ${ch.hostname} (id: ${ch.id}, status: ${ch.status})`);
-        if (!dryRun) {
-          await deleteCustomHostname(zoneId, ch.id, tokenKey);
-        }
+        console.log(`    删除: ${ch.hostname} (id: ${ch.id}, status: ${ch.status})`);
+        if (!dryRun) await deleteCustomHostname(zoneId, ch.id, tokenKey);
       }
     }
   } catch (e) {
@@ -200,15 +178,13 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // ── Step 3: 清理 Fallback Origin ──
-  console.log(`\n  ── Step 3: Fallback Origin ──`);
+  // Step 2: Fallback Origin
+  console.log(`\n  ── Step 2: Fallback Origin ──`);
   try {
     const fallback = await getFallbackOrigin(zoneId, tokenKey);
     if (fallback && fallback.origin) {
-      console.log(`    删除 Fallback Origin: ${fallback.origin}`);
-      if (!dryRun) {
-        await deleteFallbackOrigin(zoneId, tokenKey);
-      }
+      console.log(`    删除: ${fallback.origin}`);
+      if (!dryRun) await deleteFallbackOrigin(zoneId, tokenKey);
     } else {
       console.log(`    无 Fallback Origin`);
     }
@@ -221,29 +197,25 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     }
   }
 
-  // ── Step 4: 清理 Fallback Origin DNS 记录（带重试） ──
-  console.log(`\n  ── Step 4: Fallback Origin DNS 记录 ──`);
+  // Step 3: Fallback Origin DNS 记录
+  console.log(`\n  ── Step 3: Fallback Origin DNS 记录 ──`);
   const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
   try {
     for (const type of ['A', 'CNAME']) {
-      const records = await getDnsRecord(zoneId, fallbackFqdn, type, tokenKey);
+      const records = await getDnsRecords(zoneId, fallbackFqdn, tokenKey);
       for (const rec of records) {
-        console.log(`    删除 ${rec.type}: ${fallbackFqdn} → ${rec.content} (proxied=${rec.proxied})`);
+        console.log(`    删除 ${rec.type}: ${fallbackFqdn} → ${rec.content}`);
         if (!dryRun) {
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               await deleteDnsRecord(zoneId, rec.id, tokenKey);
               break;
-            } catch (e) {
-              if (e.message.includes('not allowed') || e.message.includes('fallback origin')) {
-                if (attempt < 3) {
-                  console.log(`    ⚠ 第 ${attempt} 次删除失败（引用未释放），5s 后重试...`);
-                  await sleep(5000);
-                } else {
-                  console.log(`    ⚠ 3 次重试仍失败，跳过`);
-                }
+            } catch (e2) {
+              if (attempt < 3 && (e2.message.includes('not allowed') || e2.message.includes('fallback origin'))) {
+                console.log(`    ⚠ 第 ${attempt} 次删除失败，5s 后重试...`);
+                await sleep(5000);
               } else {
-                throw e;
+                throw e2;
               }
             }
           }
@@ -255,46 +227,48 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // ── Step 5: 清理 o-{prefix} DNS 记录（CNAME → pages.dev） ──
-  console.log(`\n  ── Step 5: o-{prefix} DNS 记录 ──`);
-  for (const f of pagesFqdnList) {
-    const originFqdn = f.originFqdn;
-    try {
-      const allRecords = await sc.getDnsRecords(zoneId, originFqdn, tokenKey);
-      if (allRecords.length === 0) {
-        console.log(`    ${originFqdn}: 无 DNS 记录`);
-      } else {
-        for (const rec of allRecords) {
-          console.log(`    删除 ${rec.type}: ${originFqdn} → ${rec.content} (proxied=${rec.proxied})`);
-          if (!dryRun) {
-            await deleteDnsRecord(zoneId, rec.id, tokenKey);
+  // Step 4: o-{prefix} DNS 记录
+  console.log(`\n  ── Step 4: o-{prefix} DNS 记录 ──`);
+  const zoneMap = sc.autoDetectZoneMap();
+  const zoneInfo = zoneMap.find(z => z.zoneName === zoneName);
+  if (zoneInfo) {
+    for (const prefix of zoneInfo.names) {
+      const originFqdn = `${ORIGIN_PREFIX}${prefix}.${zoneName}`;
+      try {
+        const records = await getDnsRecords(zoneId, originFqdn, tokenKey);
+        if (records.length === 0) {
+          console.log(`    ${originFqdn}: 无 DNS 记录`);
+        } else {
+          for (const rec of records) {
+            console.log(`    删除 ${rec.type}: ${originFqdn} → ${rec.content}`);
+            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
           }
         }
+      } catch (e) {
+        console.error(`    ✗ ${originFqdn} 清理失败: ${e.message}`);
+        errors++;
       }
-    } catch (e) {
-      console.error(`    ✗ ${originFqdn} 清理失败: ${e.message}`);
-      errors++;
     }
   }
 
-  // ── Step 6: 清理 {prefix} DNS 记录 ──
-  console.log(`\n  ── Step 6: {prefix} DNS 记录 ──`);
-  for (const f of fqdns) {
-    try {
-      const allRecords = await sc.getDnsRecords(zoneId, f.fqdn, tokenKey);
-      if (allRecords.length === 0) {
-        console.log(`    ${f.fqdn}: 无 DNS 记录`);
-      } else {
-        for (const rec of allRecords) {
-          console.log(`    删除 ${rec.type}: ${f.fqdn} → ${rec.content} (proxied=${rec.proxied})`);
-          if (!dryRun) {
-            await deleteDnsRecord(zoneId, rec.id, tokenKey);
+  // Step 5: {prefix} 旧 CNAME 记录（指向 o-{prefix} 的）
+  console.log(`\n  ── Step 5: {prefix} 旧 CNAME 记录 ──`);
+  if (zoneInfo) {
+    for (const prefix of zoneInfo.names) {
+      const fqdn = `${prefix}.${zoneName}`;
+      try {
+        const records = await getDnsRecords(zoneId, fqdn, tokenKey);
+        // 只删除指向 o-{prefix} 的旧 CNAME，保留新的 A 记录
+        for (const rec of records.filter(r => r.type === 'CNAME')) {
+          if (rec.content.startsWith(ORIGIN_PREFIX) || rec.content.includes('.pages.dev')) {
+            console.log(`    删除旧 CNAME: ${fqdn} → ${rec.content}`);
+            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
           }
         }
+      } catch (e) {
+        console.error(`    ✗ ${fqdn} 清理失败: ${e.message}`);
+        errors++;
       }
-    } catch (e) {
-      console.error(`    ✗ ${f.fqdn} 清理失败: ${e.message}`);
-      errors++;
     }
   }
 
@@ -303,46 +277,51 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  CF for SaaS 资源清理脚本（o-{prefix} 模式）    ║');
+  console.log('║  SaaS 旧资源清理脚本                              ║');
   console.log('╚════════════════════════════════════════════════╝');
 
   if (dryRun) {
     console.log('\n⚠  DRY_RUN 模式 — 仅预览，不执行任何修改\n');
   }
 
-  // 解析配置
-  console.log('\n── 解析域名配置 ──');
-  let fqdnList = saas.buildFqdnOriginMap();
-  if (fqdnList.length === 0) {
-    throw new Error('未检测到任何 FQDN 配置，请检查 workers/ 下的 wrangler.toml');
-  }
+  // Step 6: o-{prefix} Pages 自定义域名
+  console.log('\n── Step 6: o-{prefix} Pages 自定义域名 ──');
+  const pagesProjects = getPagesProjects();
+  for (const [projectName, pagesTokenKey] of pagesProjects) {
+    const accountId = await getAccountId(pagesTokenKey);
+    if (!accountId) continue;
 
-  // 按 TOKEN_KEY 过滤
-  const filterTokenKey = process.env.TOKEN_KEY;
-  if (filterTokenKey) {
-    const before = fqdnList.length;
-    fqdnList = fqdnList.filter(f => f.tokenKey === filterTokenKey);
-    console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${fqdnList.length} 个 FQDN`);
-  }
-
-  if (fqdnList.length === 0) {
-    console.log('  过滤后无需处理任何 FQDN');
-    return;
-  }
-  console.log(`  共 ${fqdnList.length} 个 FQDN 需清理\n`);
-
-  // 按 zone 分组
-  const zoneGroups = {};
-  for (const f of fqdnList) {
-    if (!zoneGroups[f.zoneName]) {
-      zoneGroups[f.zoneName] = { tokenKey: f.tokenKey, items: [] };
+    try {
+      const domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
+      for (const d of domains) {
+        if (d.name.startsWith(ORIGIN_PREFIX)) {
+          console.log(`  删除 Pages 域名: ${d.name} (project: ${projectName})`);
+          if (!dryRun) {
+            try {
+              await deletePagesDomain(accountId, projectName, d.id, pagesTokenKey);
+            } catch (e) {
+              if (e.message.includes('not found') || e.message.includes('not exist')) {
+                console.log(`    Pages 域名已不存在 → 忽略`);
+              } else {
+                throw e;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`  ✗ 清理 Pages 域名失败 (${projectName}): ${e.message}`);
     }
-    zoneGroups[f.zoneName].items.push(f);
   }
+
+  // 清理各 zone 的 SaaS 资源
+  const zoneMap = sc.autoDetectZoneMap();
+  const filterTokenKey = process.env.TOKEN_KEY;
 
   let totalErrors = 0;
-  for (const [zoneName, group] of Object.entries(zoneGroups)) {
-    const result = await cleanZone(zoneName, group.tokenKey, group.items);
+  for (const zone of zoneMap) {
+    if (filterTokenKey && zone.tokenKey !== filterTokenKey) continue;
+    const result = await cleanZone(zone.zoneName, zone.tokenKey || 'default');
     totalErrors += result.errors;
   }
 

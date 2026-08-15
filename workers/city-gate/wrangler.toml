@@ -2,24 +2,19 @@ name = "city-gate"
 main = "worker.js"
 compatibility_date = "2024-12-01"
 
-# ── KV 绑定 ──────────────────────────────────────────
-# 存放 ip2region xdb 数据文件
-# 部署时 update-ip2region.js 脚本会自动查找/创建 KV namespace
-# 并将 id 写回此文件；CI 部署步骤也会自动注入 id
-#      "provinces": ["浙江", "Zhejiang"]
-[[kv_namespaces]]
-binding = "IP2REGION"
-id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
-
 # ── 域名配置（唯一配置来源）───────────────────────────
+# Worker 透明传输模式：自定义域名 → Pages (*.pages.dev) / 外部源站
+#
+# 每个组必须指定以下之一：
+#   pages_project: Pages 项目名，默认 origin 为 {pages_project}.pages.dev
+#   pages_domain:  实际 *.pages.dev 域名（项目名被占用时使用，如 cx → cx-1wd.pages.dev）
+#   origin:        非 Pages 源站 URL（如 https://answer.07170501.xyz）
+#
 # zones 数组元素支持两种写法：
 #   "zzg.cc.cd"                                      → 使用优选域名（默认）
 #   { "name": "zzg.cc.cd", "noPreferred": true }  → 不使用优选域名，
 #     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
 #     各前缀对应的源站 origin，不分配优选域名池
-#      "cities": ["杭州", "Hangzhou"],
-#      "provinces": ["浙江", "Zhejiang"],
-# 不优选域名{ "name": "zhaozg.dpdns.org", "noPreferred": true },
 [vars]
 DOMAIN_CONFIG_JSON = """
 {
@@ -33,42 +28,32 @@ DOMAIN_CONFIG_JSON = """
   "groups": [
     {
       "prefix": "sg",
-      "pages_project": "sg",
-      "cities": ["ALL"]
+      "pages_project": "sg"
     },
     {
       "prefix": "books",
-      "pages_project": "books",
-      "cities": ["ALL"],
-      "schedule": {
-        "days": [1, 2, 3, 4, 5, 6, 7],
-        "periods": ["01:00-22:00"]
-      }
+      "pages_project": "books"
     },
     {
       "prefix": "bible",
-      "pages_project": "bible",
-      "cities": ["ALL"]
+      "pages_project": "bible"
     },
     {
       "prefix": "cx",
       "pages_project": "cx",
-      "cities": ["ALL"]
+      "pages_domain": "cx-1wd.pages.dev"
     },
     {
       "prefix": "sg-resource",
-      "pages_project": "sg-resource",
-      "cities": ["ALL"]
+      "pages_project": "sg-resource"
     },
     {
       "prefix": "apk",
-      "pages_project": "cxapk",
-      "cities": ["ALL"]
+      "pages_project": "cxapk"
     },
     {
       "prefix": "answer",
-      "origin": "https://answer.07170501.xyz",
-      "cities": ["ALL"]
+      "origin": "https://answer.07170501.xyz"
     }
   ]
 }

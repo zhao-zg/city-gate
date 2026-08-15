@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
- * Cloudflare DNS 同步脚本（o-{prefix} 回源模式 — 检测模式）
+ * Cloudflare DNS 检测脚本（Worker 透明传输模式）
  *
  * 当前架构：
- *   o-{prefix}.{zone} → CNAME → {prefix}.pages.dev (proxied=true)
- *   {prefix}.{zone}   → CNAME → o-{prefix}.{zone} (proxied=false)
- *   SaaS Custom Hostname 匹配 {prefix}.{zone} → 回源到 Fallback Origin
+ *   {prefix}.{zone} → A 记录 → 优选 IP（CF Anycast IP，proxied=false）
+ *   noPreferred zone: CNAME → 源站
+ *   Worker Route 匹配域名 → 透明转发到 *.pages.dev
  *
- * 本脚本当前仅做连通性检测，不修改 DNS 记录。
- * 优选域名替换功能将在后续版本实现。
+ * 本脚本做连通性检测，不修改 DNS 记录。
  *
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 默认 CF API Token
@@ -16,11 +15,10 @@
  *   TOKEN_KEY（可选）     — 只检测指定 tokenKey 的 zone
  *
  * 用法：
- *   node scripts/sync-dns.js             # 执行检测
+ *   node scripts/sync-dns.js
  */
 
 const sc = require('./sync-cname');
-const saas = require('./setup-saas');
 const https = require('https');
 
 // ── 连通性检测 ──────────────────────────────────────────
@@ -55,7 +53,7 @@ function checkConnectivity(fqdn) {
         if (/error code:\s*1014|error 1014/i.test(body)) {
           finish({ ok: false, status: res.statusCode, reason: `HTTP ${res.statusCode} Error 1014` });
         } else if (/error code:\s*522|error 522/i.test(body)) {
-          finish({ ok: false, status: res.statusCode, reason: `HTTP ${res.statusCode} Error 522 (连接超时)` });
+          finish({ ok: false, status: res.statusCode, reason: `HTTP ${res.statusCode} Error 522` });
         } else if (sc.isChallengePage(res.statusCode, body)) {
           finish({ ok: false, status: res.statusCode, reason: `HTTP ${res.statusCode} 挑战页` });
         } else {
@@ -74,42 +72,47 @@ function checkConnectivity(fqdn) {
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  Cloudflare DNS 检测（o-{prefix} 回源模式）      ║');
+  console.log('║  Cloudflare DNS 检测（Worker 透明传输模式）      ║');
   console.log('╚════════════════════════════════════════════════╝');
 
-  // 第1步：解析配置
+  // 解析配置
   console.log('\n── 解析域名配置 ──');
-  let fqdnList = saas.buildFqdnOriginMap();
-  if (fqdnList.length === 0) {
-    throw new Error('未检测到任何 FQDN 配置，请检查 workers/ 下的 wrangler.toml');
+  const zoneMap = sc.autoDetectZoneMap();
+  if (zoneMap.length === 0) {
+    throw new Error('未检测到任何 Zone 配置，请检查 workers/ 下的 wrangler.toml');
   }
 
   // 按 TOKEN_KEY 过滤
   const filterTokenKey = process.env.TOKEN_KEY;
+  let filteredZones = zoneMap;
   if (filterTokenKey) {
-    const before = fqdnList.length;
-    fqdnList = fqdnList.filter(f => f.tokenKey === filterTokenKey);
-    console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${fqdnList.length} 个 FQDN`);
+    const before = filteredZones.length;
+    filteredZones = filteredZones.filter(z => z.tokenKey === filterTokenKey);
+    console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${filteredZones.length} 个 Zone`);
+  }
+
+  // 构建 FQDN 列表
+  const fqdnList = [];
+  for (const zone of filteredZones) {
+    for (const prefix of zone.names) {
+      fqdnList.push({
+        fqdn: `${prefix}.${zone.zoneName}`,
+        zoneName: zone.zoneName,
+        tokenKey: zone.tokenKey,
+        noPreferred: zone.noPreferred || false,
+        origin: (zone.origins && zone.origins[prefix]) || null,
+      });
+    }
   }
 
   if (fqdnList.length === 0) {
-    console.log('  过滤后无需处理任何 FQDN');
+    console.log('  无 FQDN 需检测');
     return;
   }
   console.log(`  共 ${fqdnList.length} 个 FQDN\n`);
 
-  // 打印配置概览
-  console.log('┌──────────────────────────────────────────────────────────────────┐');
-  console.log('│  FQDN                              →  回源域名    源站           │');
-  console.log('├──────────────────────────────────────────────────────────────────┤');
-  for (const f of fqdnList) {
-    const pages = saas.extractPagesDomain(f.origin);
-    console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.originFqdn.padEnd(22)} ${pages ? 'Pages' : '外部'} │`);
-  }
-  console.log('└──────────────────────────────────────────────────────────────────┘');
-
-  // 第2步：DNS 记录查询（只读）
-  console.log('\n── DNS 记录现状 ──');
+  // DNS 记录查询
+  console.log('── DNS 记录现状 ──');
   const zoneGroups = {};
   for (const f of fqdnList) {
     if (!zoneGroups[f.zoneName]) {
@@ -135,7 +138,8 @@ async function main() {
           console.log(`    ⚠ ${f.fqdn}: 无 DNS 记录`);
         } else {
           for (const rec of records) {
-            console.log(`    ${f.fqdn}: ${rec.type} → ${rec.content} (proxied=${rec.proxied})`);
+            const type = rec.type === 'A' ? 'A' : rec.type;
+            console.log(`    ${f.fqdn}: ${type} → ${rec.content} (proxied=${rec.proxied})`);
           }
         }
       } catch (e) {
@@ -144,14 +148,13 @@ async function main() {
     }
   }
 
-  // 第3步：连通性检测
+  // 连通性检测
   console.log('\n── 连通性检测 ──');
   const results = [];
   for (const f of fqdnList) {
-    const pages = saas.extractPagesDomain(f.origin);
-    if (!pages) {
-      console.log(`  ⊘ ${f.fqdn} — 非 Pages 源站，跳过检测`);
-      results.push({ fqdn: f.fqdn, ok: null, reason: '非 Pages' });
+    if (f.noPreferred && !f.origin) {
+      console.log(`  ⊘ ${f.fqdn} — noPreferred 无 origin，跳过`);
+      results.push({ fqdn: f.fqdn, ok: null, reason: 'noPreferred' });
       continue;
     }
 

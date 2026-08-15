@@ -1,4 +1,8 @@
 /**
+ * ⚠ DEPRECATED — 本文件已废弃（2026-08-15）
+ * 原因：Worker 重构为透明传输模式，不再使用 ip2region 查询。
+ * 保留仅供历史参考。
+ *
  * ip2region xdb 查询器 — Cloudflare Worker 适配版
  *
  * 从官方 ip2region JavaScript 绑定移植，移除所有 fs 依赖，

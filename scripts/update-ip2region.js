@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 /**
+ * ⚠ DEPRECATED — 本脚本已废弃（2026-08-15）
+ * 原因：Worker 重构为透明传输模式，不再使用 KV / ip2region / 城市限制。
+ * 保留仅供历史参考，如需恢复请先恢复 wrangler.toml 中的 KV 绑定和 cities 配置。
+ *
  * ip2region xdb 更新脚本
  *
  * 从 ip2region GitHub Release 下载最新 v4 和 v6 xdb 文件，上传到 Cloudflare KV。

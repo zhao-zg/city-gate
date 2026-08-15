@@ -1,4 +1,4 @@
-name: 部署 SaaS + Firewall + Pages
+name: 部署 Worker + DNS + Firewall + Pages
 
 on:
   push:
@@ -11,20 +11,19 @@ on:
         type: string
         default: '1,2'
   schedule:
-    # 每周一 UTC 0:00 自动检查 SaaS/Firewall 配置一致性
+    # 每周一 UTC 0:00 自动检查 DNS/Firewall 配置一致性
     - cron: '0 0 * * 1'
 
 # ── 多账户配置 ──────────────────────────────────────────
 # 每个账户独立 job，避免 matrix + secrets 动态引用限制
-# 新增账户只需：1) 添加 GitHub Secrets  2) 复制一份对应 job
 
 jobs:
   # ================================================================
-  #  Job 0：清理旧 Worker Routes（账户1）
+  #  Job 0：部署 Worker（账户1）
   # ================================================================
-  cleanup-routes-1:
+  deploy-worker-1:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -32,18 +31,23 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 清理旧 Worker Routes（账户1）
+      - name: 生成 Worker Routes
+        run: node scripts/generate-routes.js
+      - name: 安装 wrangler
+        run: npm install -g wrangler
+      - name: 部署 Worker（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TOKEN_KEY: default
-        run: node scripts/cleanup-worker-routes.js
+        run: |
+          cd workers/city-gate
+          wrangler deploy -c wrangler.generated.toml
 
   # ================================================================
-  #  Job 0b：清理旧 Worker Routes（账户2）
+  #  Job 0b：部署 Worker（账户2）
   # ================================================================
-  cleanup-routes-2:
+  deploy-worker-2:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: 检查是否部署账户2
         id: check
@@ -62,19 +66,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 清理旧 Worker Routes（账户2）
+      - name: 生成 Worker Routes
+        if: steps.check.outputs.skip == 'false'
+        run: node scripts/generate-routes.js
+      - name: 安装 wrangler
+        if: steps.check.outputs.skip == 'false'
+        run: npm install -g wrangler
+      - name: 部署 Worker（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
-          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
-          TOKEN_KEY: account2
-        run: node scripts/cleanup-worker-routes.js
+        run: |
+          cd workers/city-gate-2
+          wrangler deploy -c wrangler.generated.toml
 
   # ================================================================
-  # Job 1：SaaS 配置（Fallback Origin + Custom Hostnames + Pages 域名激活）（账户1）
+  #  Job 1：清理旧 SaaS 资源 + 配置 DNS（账户1）
   # ================================================================
-  setup-saas-1:
-    needs: [cleanup-routes-1]
+  setup-dns-1:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
@@ -91,7 +100,7 @@ jobs:
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           TOKEN_KEY: default
         run: node scripts/cleanup-saas.js
-      - name: 配置 SaaS + Pages 域名激活（账户1）
+      - name: 配置 DNS A 记录 + 优选 IP（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
@@ -99,10 +108,9 @@ jobs:
         run: node scripts/setup-saas.js
 
   # ================================================================
-  # Job 2：SaaS 配置（Fallback Origin + Custom Hostnames + Pages 域名激活）（账户2）
+  #  Job 2：清理旧 SaaS 资源 + 配置 DNS（账户2）
   # ================================================================
-  setup-saas-2:
-    needs: [cleanup-routes-2]
+  setup-dns-2:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
@@ -131,7 +139,7 @@ jobs:
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
           TOKEN_KEY: account2
         run: node scripts/cleanup-saas.js
-      - name: 配置 SaaS + Pages 域名激活（账户2）
+      - name: 配置 DNS A 记录 + 优选 IP（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -269,22 +277,22 @@ jobs:
   # ================================================================
   deploy-summary:
     runs-on: ubuntu-latest
-    needs: [cleanup-routes-1, cleanup-routes-2, setup-saas-1, setup-saas-2, setup-firewall-1, setup-firewall-2, deploy-pages, deploy-pages-2]
+    needs: [deploy-worker-1, deploy-worker-2, setup-dns-1, setup-dns-2, setup-firewall-1, setup-firewall-2, deploy-pages, deploy-pages-2]
     if: always()
     steps:
       - name: 部署结果汇总
         run: |
           echo "━━━ 部署结果汇总 ━━━"
-          echo "账户1 Routes:   ${{ needs.cleanup-routes-1.result }}"
-          echo "账户2 Routes:   ${{ needs.cleanup-routes-2.result }}"
-          echo "账户1 SaaS:     ${{ needs.setup-saas-1.result }}"
-          echo "账户2 SaaS:     ${{ needs.setup-saas-2.result }}"
+          echo "账户1 Worker:  ${{ needs.deploy-worker-1.result }}"
+          echo "账户2 Worker:  ${{ needs.deploy-worker-2.result }}"
+          echo "账户1 DNS:      ${{ needs.setup-dns-1.result }}"
+          echo "账户2 DNS:      ${{ needs.setup-dns-2.result }}"
           echo "账户1 Firewall: ${{ needs.setup-firewall-1.result }}"
           echo "账户2 Firewall: ${{ needs.setup-firewall-2.result }}"
           echo "账户1 Pages:    ${{ needs.deploy-pages.result }}"
           echo "账户2 Pages:    ${{ needs.deploy-pages-2.result }}"
           FAILED=false
-          for r in "${{ needs.setup-saas-1.result }}" "${{ needs.setup-saas-2.result }}" "${{ needs.setup-firewall-1.result }}" "${{ needs.setup-firewall-2.result }}" "${{ needs.deploy-pages.result }}" "${{ needs.deploy-pages-2.result }}"; do
+          for r in "${{ needs.deploy-worker-1.result }}" "${{ needs.deploy-worker-2.result }}" "${{ needs.setup-dns-1.result }}" "${{ needs.setup-dns-2.result }}" "${{ needs.setup-firewall-1.result }}" "${{ needs.setup-firewall-2.result }}" "${{ needs.deploy-pages.result }}" "${{ needs.deploy-pages-2.result }}"; do
             if [ "$r" = "failure" ]; then
               FAILED=true
             fi

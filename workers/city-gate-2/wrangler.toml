@@ -3,22 +3,11 @@ main = "worker.js"
 compatibility_date = "2024-12-01"
 
 # ── 账户2 Worker — 冗余容灾实例 ──────────────────────
-# 与 city-gate 共享同一份 worker.js 代码（通过相对路径引用 ../shared/）
+# 与 city-gate 共享同一份 worker.js 代码
 # 域名使用 zhaozg.de5.net Zone，Pages 源站使用账户2的 Pages 项目
-# KV 绑定账户2自己的 IP2REGION namespace
-
-# ── KV 绑定 ──────────────────────────────────────────
-# 账户2独立的 KV namespace，部署时 CI 会自动注入 id
-[[kv_namespaces]]
-binding = "IP2REGION"
-id = "PLACEHOLDER_KV_IP2REGION_NAMESPACE_ID"
 
 # ── 域名配置（唯一配置来源）───────────────────────────
-# zones 数组元素支持两种写法：
-#   "zhaozg.de5.net"                                  → 使用优选域名（默认）
-#   { "name": "zhaozg.de5.net", "noPreferred": true } → 不使用优选域名，
-#     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
-#     各前缀对应的源站 origin，不分配优选域名池
+# Worker 透明传输模式：自定义域名 → Pages (*.pages.dev) / 外部源站
 [vars]
 DOMAIN_CONFIG_JSON = """
 {
@@ -26,38 +15,28 @@ DOMAIN_CONFIG_JSON = """
   "groups": [
     {
       "prefix": "sg",
-      "pages_project": "sg",
-      "cities": ["ALL"]
+      "pages_project": "sg"
     },
     {
       "prefix": "books",
-      "pages_project": "books",
-      "cities": ["ALL"],
-      "schedule": {
-        "days": [1, 2, 3, 4, 5, 6, 7],
-        "periods": ["01:00-22:00"]
-      }
+      "pages_project": "books"
     },
     {
       "prefix": "bible",
-      "pages_project": "bible",
-      "cities": ["杭州", "Hangzhou"],
-      "provinces": ["浙江", "Zhejiang"]
+      "pages_project": "bible"
     },
     {
       "prefix": "cx",
       "pages_project": "cx",
-      "cities": ["ALL"]
+      "pages_domain": "cx-1wd.pages.dev"
     },
     {
       "prefix": "sg-resource",
-      "pages_project": "sg-resource",
-      "cities": ["ALL"]
+      "pages_project": "sg-resource"
     },
     {
       "prefix": "apk",
-      "pages_project": "cxapk",
-      "cities": ["ALL"]
+      "pages_project": "cxapk"
     }
   ]
 }
