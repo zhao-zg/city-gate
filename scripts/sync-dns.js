@@ -11,7 +11,7 @@
  *   1. 同步 DNS — 从优选域名池解析 IP，验证 1034 + 挑战页，按 IP_DEDUP_PREFIX 去重，
  *                 延迟排序，分配 A 记录，写入 Cloudflare DNS
  *   2. 检验 DNS — 对各 FQDN 做 HTTPS 连通性检测（1014/522/挑战页识别）
- *   3. 测速     — 对每个 zone 的 A 记录 IP 做下载测速，
+ *   3. 测速     — 对每个 zone 的 A 记录 IP 做下载测速（CF 官方 __down 端点），
  *                 最低 500 KB/s 达标即停，不达标自动替换下一个候选 IP
  *
  * 环境变量：
@@ -107,11 +107,24 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 
 /**
  * 对指定 IP 做下载速度测试
- * 通过 IP 直连 + SNI/Host 指定域名，在测速时长内持续下载并计算速度
- * 单个请求结束时自动发起新请求（keep-alive 复用连接），避免小页面导致测速过早结束
+ *
+ * 使用 Cloudflare 官方测速端点 speed.cloudflare.com/__down?bytes=N
+ * 通过 IP 直连 + SNI 指定 speed.cloudflare.com，下载指定大小的随机数据。
+ *
+ * 策略：
+ *   - 初始下载 10MB，根据测速时长按需续传（保持持续下载满测速时长）
+ *   - 2 个并发请求提高吞吐量测量准确性
+ *   - keep-alive 复用 TLS 连接，避免反复握手开销
+ *
  * 返回 { speed_kbps, downloaded, duration_ms, requests } 或 null（失败）
  */
-function testDownloadSpeed(ip, testHost, testSec) {
+function testDownloadSpeed(ip, testSec) {
+  const SPEED_HOST = 'speed.cloudflare.com';
+  // 每次请求下载 10MB 随机数据
+  const CHUNK_BYTES = 10 * 1024 * 1024;
+  // 测速并发数
+  const CONCURRENCY = 2;
+
   return new Promise((resolve) => {
     const start = Date.now();
     const durationMs = testSec * 1000;
@@ -121,10 +134,10 @@ function testDownloadSpeed(ip, testHost, testSec) {
     let requestCount = 0;
     let activeRequests = 0;
 
-    // keep-alive agent 复用 TLS 连接，避免反复握手
+    // keep-alive agent 复用 TLS 连接
     const agent = new https.Agent({
       keepAlive: true,
-      maxSockets: 2,
+      maxSockets: CONCURRENCY,
       rejectUnauthorized: false,
     });
 
@@ -143,7 +156,11 @@ function testDownloadSpeed(ip, testHost, testSec) {
       resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start, requests: requestCount });
     };
 
-    const testTimer = setTimeout(finish, durationMs);
+    // 测速时长到点后延迟一点等待在途数据统计
+    const testTimer = setTimeout(() => {
+      // 给在途请求 500ms 缓冲收尾
+      setTimeout(finish, 500);
+    }, durationMs);
     const hardTimer = setTimeout(finish, timeoutMs);
 
     function makeRequest() {
@@ -158,20 +175,28 @@ function testDownloadSpeed(ip, testHost, testSec) {
 
       const req = https.request({
         host: ip,
-        servername: testHost,
-        headers: { Host: testHost },
-        path: '/',
+        servername: SPEED_HOST,
+        headers: { Host: SPEED_HOST },
+        path: `/__down?bytes=${CHUNK_BYTES}`,
         method: 'GET',
         timeout: timeoutMs,
         agent,
         rejectUnauthorized: false,
       }, (res) => {
+        // 非 200 响应不算有效下载
+        if (res.statusCode !== 200) {
+          activeRequests--;
+          if (!settled) setTimeout(makeRequest, 100);
+          res.resume();
+          return;
+        }
+
         res.on('data', (chunk) => {
           if (!settled) totalDownloaded += chunk.length;
         });
         res.on('end', () => {
           activeRequests--;
-          if (!settled) makeRequest(); // 小页面下载完，继续发新请求
+          if (!settled) makeRequest(); // 10MB 下载完，继续发新请求
         });
         res.on('error', () => {
           activeRequests--;
@@ -187,9 +212,10 @@ function testDownloadSpeed(ip, testHost, testSec) {
       req.end();
     }
 
-    // 2 个并发请求提高吞吐量测量准确性
-    makeRequest();
-    makeRequest();
+    // 并发请求
+    for (let i = 0; i < CONCURRENCY; i++) {
+      makeRequest();
+    }
   });
 }
 
@@ -648,12 +674,12 @@ async function main() {
     if (speedResults.length >= needCount) break;
 
     console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
-    const result = await testDownloadSpeed(ip, testHost, SPEED_TEST_SEC);
+    const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
     testedIps.add(ip);
 
     if (result) {
       const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-      console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
+      console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms / ${result.requests} 请求）`);
       if (result.speed_kbps >= MIN_SPEED_KBPS) {
         speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
       }
@@ -684,12 +710,12 @@ async function main() {
           if (latency === null) { testedIps.add(ip); continue; }
 
           console.log(`  ▸ ${ip}（候选，延迟 ${latency}ms）测速...`);
-          const result = await testDownloadSpeed(ip, testHost, SPEED_TEST_SEC);
+          const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
           testedIps.add(ip);
 
           if (result) {
             const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-            console.log(`    ${mark} ${result.speed_kbps} KB/s`);
+            console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.requests} 请求）`);
             if (result.speed_kbps >= MIN_SPEED_KBPS) {
               speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
             }
