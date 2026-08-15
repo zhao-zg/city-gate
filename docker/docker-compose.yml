@@ -12,7 +12,7 @@ services:
       - CLOUDFLARE_API_TOKEN_2=${CLOUDFLARE_API_TOKEN_2:-}
       # ── 定时计划（cron 表达式，默认每 6 小时） ──
       - CRON_SCHEDULE=${CRON_SCHEDULE:-0 */6 * * *}
-      # ── 运行模式: sync（同步 CNAME） / check（仅检测） ──
+      # ── 运行模式: sync（同步 DNS + 检验 + 测速） / check（仅检测） ──
       - RUN_MODE=${RUN_MODE:-sync}
       # ── 预览模式: 1=仅预览不执行修改 / 0=正常执行 ──
       - DRY_RUN=${DRY_RUN:-0}
@@ -21,6 +21,12 @@ services:
       # ── Push 通知（可选，需配置通知 URL） ──
       - NOTIFY_URL=${NOTIFY_URL:-}
       - NOTIFY_TOKEN=${NOTIFY_TOKEN:-}
+      # ── A 记录配置 ──
+      - IP_PER_ZONE=${IP_PER_ZONE:-2}
+      - IP_DEDUP_PREFIX=${IP_DEDUP_PREFIX:-24}
+      # ── 测速配置 ──
+      - MIN_SPEED_KBPS=${MIN_SPEED_KBPS:-500}
+      - SPEED_TEST_SEC=${SPEED_TEST_SEC:-2}
       # ── Zone 配置覆盖（可选，JSON 字符串，留空则使用镜像内 wrangler.toml） ──
       - ZONE_CONFIG_JSON=${ZONE_CONFIG_JSON:-}
     volumes:
