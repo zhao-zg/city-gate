@@ -436,8 +436,9 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   console.log(`\n  ── Step 1: 回源域名 DNS（o-{prefix} CNAME → pages.dev, proxied=true） ──`);
   for (const f of pagesFqdnList) {
     const pagesDomain = f.pagesDomain;
+    const originFqdn = f.originFqdn;
     if (!pagesDomain) {
-      console.log(`    ${f.originFqdn}: 跳过（pagesProject "${f.pagesProject}" 未找到）`);
+      console.log(`    ${originFqdn}: 跳过（pagesProject "${f.pagesProject}" 未找到）`);
       continue;
     }
     console.log(`    检查 DNS: ${originFqdn} → CNAME ${pagesDomain} (proxied=true)`);
