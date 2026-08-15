@@ -199,13 +199,11 @@ async function ensureOriginRules(zoneId, zoneName, pagesFqdnMap, tokenKey) {
     rules.push({
       expression,
       description: `Origin Rule: ${hostnames.join(', ')} → ${pagesDevDomain}`,
-      action: 'rewrite',
+      action: 'route',
       action_parameters: {
-        headers: {
-          'Host': {
-            operation: 'set',
-            value: pagesDevDomain,
-          },
+        host_header: pagesDevDomain,
+        origin: {
+          host: pagesDevDomain,
         },
       },
     });
