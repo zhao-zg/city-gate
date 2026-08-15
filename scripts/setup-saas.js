@@ -1,23 +1,21 @@
 #!/usr/bin/env node
 /**
- * Cloudflare for SaaS 配置脚本（多账户版）
+ * Pages 自定义域名直绑配置脚本（多账户版）
  *
- * 自动化配置 CF for SaaS：
- *   1. 为每个 zone 创建 Fallback Origin DNS 记录（proxy-fallback.{zone} → A 192.0.2.1, proxied=true）
- *   2. 设置 Fallback Origin
- *   3. 为每个 FQDN 创建 zone 内 origin CNAME（o-{prefix}.{zone} → *.pages.dev）
- *   4. 为每个 Pages 项目添加 origin CNAME 为自定义域名
- *   5. 为每个 FQDN 创建 Custom Hostname（指定 custom_origin 指向 zone 内 CNAME）
- *   6. 等待 Custom Hostname 状态 Active
+ * 替代原 CF for SaaS 方案，改为 Pages 直接绑定自定义域名：
+ *   1. 为每个 FQDN 添加为对应 Pages 项目的自定义域名
+ *   2. 为验证需要，临时创建 CNAME FQDN → pages.dev (proxied=true)
+ *   3. 等待域名状态 Active
+ *   4. 清理旧的 SaaS 配置（Custom Hostnames、Fallback Origins、origin CNAME）
  *
- * 配置来源：workers/ 下的 wrangler.toml 中的 DOMAIN_CONFIG_JSON
- *   与 sync-cname.js / sync-dns.js 共用同一解析逻辑
+ * DNS A 记录（优选 IP）由 sync-dns.js 管理，本脚本不涉及。
  *
  * 环境变量：
- *   CLOUDFLARE_API_TOKEN   — 账户1 Token（需 Zone:Edit + DNS:Edit + SSL and Certificates:Edit 权限）
+ *   CLOUDFLARE_API_TOKEN   — 账户1 Token（需 Zone:Edit + DNS:Edit + Pages:Edit 权限）
  *   CLOUDFLARE_API_TOKEN_2 — 账户2 Token
  *   TOKEN_KEY（可选）       — 只处理指定 tokenKey 的 zone（'default' 或 'account2'），不设则全部处理
  *   DRY_RUN（可选）        — 设为 1 则只预览不执行
+ *   SKIP_CLEANUP（可选）   — 设为 1 则跳过 SaaS 配置清理
  *   ZONE_CONFIG_JSON（可选）— 覆盖 wrangler.toml 配置
  *
  * 用法：
@@ -28,15 +26,16 @@
 const sc = require('./sync-cname');
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
-const FALLBACK_IP = '192.0.2.1';        // RFC 5737 文档保留 IP，CF SaaS 占位用
-const FALLBACK_PREFIX = 'proxy-fallback'; // Fallback Origin DNS 记录前缀
-const ORIGIN_PREFIX = 'o-';              // origin CNAME 前缀，如 o-sg.1189.kdns.fr → sg-f3b.pages.dev
-const POLL_TIMEOUT_MS = 30000;           // Fallback Origin 状态轮询超时
-const POLL_INTERVAL_MS = 2000;           // 轮询间隔
-const CH_POLL_TIMEOUT_MS = 60000;        // Custom Hostname 状态轮询超时
-const CH_POLL_INTERVAL_MS = 3000;        // Custom Hostname 轮询间隔
+const ORIGIN_PREFIX = 'o-';              // origin CNAME 前缀（清理用）
+const FALLBACK_PREFIX = 'proxy-fallback'; // Fallback Origin DNS 记录前缀（清理用）
+const FALLBACK_IP = '192.0.2.1';        // RFC 5737 文档保留 IP（清理用）
+const DOMAIN_POLL_TIMEOUT_MS = 120000;    // Pages 域名激活轮询超时
+const DOMAIN_POLL_INTERVAL_MS = 5000;     // Pages 域名轮询间隔
+const CH_POLL_TIMEOUT_MS = 60000;         // Custom Hostname 轮询超时（清理用）
+const CH_POLL_INTERVAL_MS = 3000;         // Custom Hostname 轮询间隔
 
 const dryRun = process.env.DRY_RUN === '1';
+const skipCleanup = process.env.SKIP_CLEANUP === '1';
 
 // ── 工具函数 ──────────────────────────────────────────
 
@@ -86,7 +85,7 @@ async function deleteDnsRecord(zoneId, recordId, tokenKey) {
   await cfApi(`/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE', tokenKey });
 }
 
-// ── Fallback Origin ──────────────────────────────────
+// ── Fallback Origin（仅清理用）──────────────────────
 
 async function getFallbackOrigin(zoneId, tokenKey) {
   const json = await cfApi(`/zones/${zoneId}/custom_hostnames/fallback_origin`, { tokenKey });
@@ -102,19 +101,7 @@ async function setFallbackOrigin(zoneId, origin, tokenKey) {
   return json.result;
 }
 
-async function waitForFallbackOriginActive(zoneId, tokenKey) {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const result = await getFallbackOrigin(zoneId, tokenKey);
-    if (result && result.status === 'active') {
-      return true;
-    }
-    await sleep(POLL_INTERVAL_MS);
-  }
-  return false;
-}
-
-// ── Custom Hostnames ─────────────────────────────────
+// ── Custom Hostnames（仅清理用）─────────────────────
 
 async function listCustomHostnames(zoneId, tokenKey) {
   const all = [];
@@ -131,40 +118,8 @@ async function listCustomHostnames(zoneId, tokenKey) {
   return all;
 }
 
-async function getCustomHostname(zoneId, hostname, tokenKey) {
-  const json = await cfApi(`/zones/${zoneId}/custom_hostnames?hostname=${encodeURIComponent(hostname)}`, { tokenKey });
-  return json.result && json.result[0] || null;
-}
-
-async function createCustomHostname(zoneId, hostname, customOrigin, tokenKey) {
-  const body = {
-    hostname,
-  };
-  if (customOrigin) {
-    body.custom_origin_server = customOrigin;
-  }
-  const json = await cfApi(`/zones/${zoneId}/custom_hostnames`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    tokenKey,
-  });
-  return json.result;
-}
-
 async function deleteCustomHostname(zoneId, chId, tokenKey) {
   await cfApi(`/zones/${zoneId}/custom_hostnames/${chId}`, { method: 'DELETE', tokenKey });
-}
-
-async function waitForCustomHostnameActive(zoneId, hostname, tokenKey) {
-  const deadline = Date.now() + CH_POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const ch = await getCustomHostname(zoneId, hostname, tokenKey);
-    if (ch && ch.status === 'active') {
-      return ch;
-    }
-    await sleep(CH_POLL_INTERVAL_MS);
-  }
-  return null;
 }
 
 // ── Pages 自定义域名 ─────────────────────────────────
@@ -223,7 +178,6 @@ async function loadPagesProjects(tokenKey) {
   try {
     const json = await cfApi(`/accounts/${accountId}/pages/projects`, { tokenKey });
     for (const proj of (json.result || [])) {
-      // 每个项目有 domains 数组，其中包含 *.pages.dev 域名
       for (const domain of (proj.domains || [])) {
         if (domain.endsWith('.pages.dev')) {
           projectMap.set(domain, proj.name);
@@ -231,7 +185,6 @@ async function loadPagesProjects(tokenKey) {
       }
     }
   } catch {
-    // Token 无 Pages 读取权限
     return null;
   }
 
@@ -242,14 +195,6 @@ async function loadPagesProjects(tokenKey) {
 
 /**
  * 查找 Pages 项目信息（优先使用显式 pages_project 配置）
- *
- * 优先路径：wrangler.toml 中 group 配置了 pages_project 字段
- *   → 直接用 tokenKey + projectName 查询账户 ID，无需全量列表
- *   → 同名项目在两个账户都存在时，用 tokenKey 区分（city-gate→default, city-gate-2→account2）
- *
- * 回退路径：未配置 pages_project
- *   → 通过 origin 的 *.pages.dev 域名全量列表反查（旧逻辑，保留兼容）
- *
  * 返回 { accountId, tokenKey, projectName } 或 null
  */
 async function findPagesProject(origin, tokenKey, pagesProject) {
@@ -304,23 +249,47 @@ async function addPagesDomain(accountId, projectName, domain, tokenKey) {
   return json.result;
 }
 
+async function deletePagesDomain(accountId, projectName, domainId, tokenKey) {
+  await cfApi(`/accounts/${accountId}/pages/projects/${projectName}/domains/${domainId}`, { method: 'DELETE', tokenKey });
+}
+
+/**
+ * 等待 Pages 自定义域名状态变为 Active
+ * 返回 true/false
+ */
+async function waitForPagesDomainActive(accountId, projectName, domainName, tokenKey) {
+  const deadline = Date.now() + DOMAIN_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const domains = await listPagesDomains(accountId, projectName, tokenKey);
+      const matched = domains.find(d => d.name === domainName);
+      if (matched) {
+        if (matched.status === 'active') return true;
+        // status 可能是 'pending' 或 'initializing'
+        console.log(`      域名状态: ${matched.status}, 等待中...`);
+      } else {
+        console.log(`      域名未找到，等待中...`);
+      }
+    } catch (e) {
+      console.log(`      查询域名状态失败: ${e.message}`);
+    }
+    await sleep(DOMAIN_POLL_INTERVAL_MS);
+  }
+  return false;
+}
+
 // ── 配置解析 ─────────────────────────────────────────
 
 /**
  * 从 ZONE_MAP 和 wrangler.toml 提取每条 FQDN → origin 映射
  * 返回 [{ fqdn, zoneName, tokenKey, origin, prefix, pagesProject }]
- * pagesProject 为可选字段，来自 wrangler.toml 中 group 的 pages_project 配置
  */
 function buildFqdnOriginMap() {
-  // 复用 autoDetectZoneMap 获取 zone + prefix 列表
   const zoneMap = sc.autoDetectZoneMap();
 
-  // 同时读取 wrangler.toml 的完整 DOMAIN_CONFIG_JSON 以获取 origin
   const fs = require('fs');
   const path = require('path');
 
-  // 从环境变量或 wrangler.toml 获取完整配置
-  // 需要保留 Worker 名（目录名）以正确映射 tokenKey
   let allConfigs = [];
   if (process.env.ZONE_CONFIG_JSON) {
     const parsed = JSON.parse(process.env.ZONE_CONFIG_JSON);
@@ -333,7 +302,6 @@ function buildFqdnOriginMap() {
       const tomlText = fs.readFileSync(path.join(workersDir, dir, 'wrangler.toml'), 'utf8');
       const config = sc.parseDomainConfig(tomlText);
       if (config) {
-        // 用 Worker 名映射 tokenKey（与 autoDetectZoneMap 逻辑一致）
         const workerName = sc.parseWorkerName(tomlText) || dir;
         const tokenKey = sc.WORKER_TOKEN_KEYS[workerName] || 'default';
         allConfigs.push({ config, tokenKey, workerName });
@@ -341,16 +309,12 @@ function buildFqdnOriginMap() {
     }
   }
 
-  // 构建 prefix → { origin, pagesProject } 映射（按 tokenKey 分组，因为账户2有不同的 origin）
-  const prefixInfoByTokenKey = {}; // { default: { sg: { origin, pagesProject }, ... }, account2: { ... } }
+  const prefixInfoByTokenKey = {};
 
   for (const entry of allConfigs) {
-    // 环境变量方式：entry 直接是 config 对象，需要从 zones 找 tokenKey
-    // wrangler.toml 方式：entry = { config, tokenKey, workerName }
     const config = entry.config || entry;
     let tokenKey = entry.tokenKey || 'default';
 
-    // 环境变量方式 fallback：检查 zones 中是否有 tokenKey 指定的
     if (!entry.tokenKey && config.zones) {
       for (const zone of config.zones) {
         if (typeof zone === 'object' && zone.tokenKey) {
@@ -373,7 +337,6 @@ function buildFqdnOriginMap() {
     }
   }
 
-  // 展开所有 FQDN
   const fqdnList = [];
   for (const zone of zoneMap) {
     const tokenKey = zone.tokenKey || 'default';
@@ -398,328 +361,313 @@ function buildFqdnOriginMap() {
   return fqdnList;
 }
 
-// ── 主逻辑 ──────────────────────────────────────────
+// ── 主逻辑：Pages 直绑 ──────────────────────────────
 
-async function processZone(zoneName, tokenKey, fqdns) {
-  console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''} ━━━`);
+/**
+ * 为 Pages 项目添加用户域名为自定义域名
+ * 流程：
+ *   1. 检查 Pages 项目是否已绑定该域名
+ *   2. 若未绑定，需要先创建验证 CNAME（FQDN → pages.dev, proxied=true）
+ *   3. 添加域名到 Pages 项目
+ *   4. 等待域名状态变为 Active
+ *   5. 删除验证 CNAME（A 记录由 sync-dns.js 管理）
+ *   6. 若已绑定且 Active，跳过
+ */
+async function bindPagesDomain(fqdn, origin, pagesProject, zoneName, tokenKey) {
+  const pagesDomain = extractPagesDomain(origin);
+  if (!pagesDomain) {
+    console.log(`    ${fqdn} → ${origin} 非 Pages 源站 → 跳过`);
+    return { result: 'skipped', error: false };
+  }
+
+  // 查找 Pages 项目
+  let pagesInfo;
+  try {
+    pagesInfo = await findPagesProject(origin, tokenKey, pagesProject);
+  } catch (e) {
+    console.error(`    ✗ 查找 Pages 项目失败: ${e.message}`);
+    return { result: 'error', error: true };
+  }
+
+  if (!pagesInfo) {
+    console.error(`    ✗ 未找到包含 ${pagesDomain} 的 Pages 项目`);
+    return { result: 'error', error: true };
+  }
+
+  console.log(`    → 项目: ${pagesInfo.projectName} (account: ${pagesInfo.tokenKey})`);
+
+  // 检查域名是否已绑定
+  let domains;
+  try {
+    domains = await listPagesDomains(pagesInfo.accountId, pagesInfo.projectName, pagesInfo.tokenKey);
+  } catch (e) {
+    console.error(`    ✗ 获取 Pages 域名列表失败: ${e.message}`);
+    return { result: 'error', error: true };
+  }
+
+  const matched = domains.find(d => d.name === fqdn);
+  if (matched && matched.status === 'active') {
+    console.log(`    域名已绑定且 Active → 跳过`);
+    return { result: 'skipped', error: false };
+  }
+
+  if (matched && matched.status !== 'active') {
+    console.log(`    域名已绑定但状态: ${matched.status}，等待激活...`);
+    if (!dryRun) {
+      const ok = await waitForPagesDomainActive(pagesInfo.accountId, pagesInfo.projectName, fqdn, pagesInfo.tokenKey);
+      if (ok) {
+        console.log(`    ✓ 域名已 Active`);
+        return { result: 'activated', error: false };
+      } else {
+        console.log(`    ⚠ 域名未在 ${DOMAIN_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
+        return { result: 'timeout', error: true };
+      }
+    }
+    return { result: 'skipped_dry', error: false };
+  }
+
+  // 域名未绑定 → 需要添加
+  // 步骤1：获取 zone ID
+  let zoneId;
+  try {
+    zoneId = await sc.getZoneId(zoneName, tokenKey);
+  } catch (e) {
+    console.error(`    ✗ 获取 Zone ID 失败: ${e.message}`);
+    return { result: 'error', error: true };
+  }
+
+  // 步骤2：创建验证 CNAME（FQDN → pages.dev, proxied=true）
+  console.log(`    创建验证 CNAME: ${fqdn} → ${pagesDomain} (proxied=true)`);
+  let cnameCreated = false;
+  if (!dryRun) {
+    try {
+      // 先检查是否已有记录
+      const existingCname = await getDnsRecord(zoneId, fqdn, 'CNAME', tokenKey);
+      const existingA = await getDnsRecord(zoneId, fqdn, 'A', tokenKey);
+
+      // 如果已有 A 记录（优选 IP），临时删除
+      if (existingA.length > 0) {
+        for (const rec of existingA) {
+          console.log(`    临时删除 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
+          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+        }
+      }
+
+      // 检查是否已有匹配的 CNAME
+      const matchedCname = existingCname.find(r => r.content === pagesDomain && r.proxied === true);
+      if (!matchedCname) {
+        // 删除不匹配的 CNAME
+        for (const rec of existingCname) {
+          console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
+          await deleteDnsRecord(zoneId, rec.id, tokenKey);
+        }
+
+        await createDnsRecord(zoneId, {
+          type: 'CNAME',
+          name: fqdn,
+          content: pagesDomain,
+          proxied: true,
+          ttl: 1,
+        }, tokenKey);
+        cnameCreated = true;
+        console.log(`    ✓ 验证 CNAME 已创建`);
+      } else {
+        console.log(`    验证 CNAME 已存在 → 跳过创建`);
+        cnameCreated = true;
+      }
+    } catch (e) {
+      console.error(`    ✗ 验证 CNAME 创建失败: ${e.message}`);
+      return { result: 'error', error: true };
+    }
+  }
+
+  // 步骤3：添加域名到 Pages 项目
+  console.log(`    添加自定义域名 ${fqdn} 到 Pages 项目 ${pagesInfo.projectName}...`);
+  if (!dryRun) {
+    try {
+      await addPagesDomain(pagesInfo.accountId, pagesInfo.projectName, fqdn, pagesInfo.tokenKey);
+      console.log(`    ✓ 已添加`);
+    } catch (e) {
+      if (e.message.includes('already') || e.message.includes('duplicate')) {
+        console.log(`    域名已存在于 Pages 项目 → 继续等待激活`);
+      } else {
+        console.error(`    ✗ 添加失败: ${e.message}`);
+        // 清理 CNAME
+        if (cnameCreated) {
+          console.log(`    清理验证 CNAME...`);
+          try {
+            const recs = await getDnsRecord(zoneId, fqdn, 'CNAME', tokenKey);
+            for (const rec of recs) {
+              await deleteDnsRecord(zoneId, rec.id, tokenKey);
+            }
+          } catch {}
+        }
+        return { result: 'error', error: true };
+      }
+    }
+  }
+
+  // 步骤4：等待域名状态变为 Active
+  console.log(`    等待域名激活...`);
+  if (!dryRun) {
+    const ok = await waitForPagesDomainActive(pagesInfo.accountId, pagesInfo.projectName, fqdn, pagesInfo.tokenKey);
+    if (ok) {
+      console.log(`    ✓ 域名已 Active`);
+    } else {
+      console.log(`    ⚠ 域名未在 ${DOMAIN_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
+      // 不算错误，可能证书签发中
+    }
+  }
+
+  // 步骤5：删除验证 CNAME（A 记录由 sync-dns.js 管理）
+  if (cnameCreated && !dryRun) {
+    console.log(`    清理验证 CNAME...`);
+    try {
+      const recs = await getDnsRecord(zoneId, fqdn, 'CNAME', tokenKey);
+      for (const rec of recs) {
+        console.log(`    删除 CNAME → ${rec.content}`);
+        await deleteDnsRecord(zoneId, rec.id, tokenKey);
+      }
+      console.log(`    ✓ 验证 CNAME 已删除（A 记录由 sync-dns.js 管理）`);
+    } catch (e) {
+      console.error(`    ✗ 清理验证 CNAME 失败: ${e.message}`);
+    }
+  }
+
+  return { result: 'created', error: false };
+}
+
+// ── 清理旧的 SaaS 配置 ──────────────────────────────
+
+async function cleanupSaaSConfig(zoneName, tokenKey, fqdns) {
+  console.log(`\n  ── 清理旧 SaaS 配置 ──`);
 
   let zoneId;
   try {
     zoneId = await sc.getZoneId(zoneName, tokenKey);
   } catch (e) {
-    console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
-    return { errors: fqdns.length, fallback: false, hostnames: 0 };
+    console.error(`    ✗ 获取 Zone ID 失败: ${e.message}`);
+    return { errors: 0 };
   }
 
-  // ── Step 1: Fallback Origin DNS 记录 ──
-  const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
-  console.log(`\n  [Fallback Origin] ${fallbackFqdn} → A ${FALLBACK_IP} (proxied=true)`);
+  let errors = 0;
 
-  let fallbackReady = false;
+  // 1. 删除 Custom Hostnames
+  console.log(`\n  [清理] Custom Hostnames`);
   try {
-    const existing = await getDnsRecord(zoneId, fallbackFqdn, 'A', tokenKey);
-    const matched = existing.filter(r => r.content === FALLBACK_IP && r.proxied === true);
-
-    if (matched.length > 0) {
-      console.log(`    A 记录已存在且匹配 → 跳过`);
-    } else {
-      // 删除旧记录
-      for (const rec of existing) {
-        console.log(`    删除旧 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
-        if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
-      }
-      // 也检查是否有其他类型记录（如 CNAME）
-      const otherRecords = await getDnsRecord(zoneId, fallbackFqdn, 'CNAME', tokenKey);
-      for (const rec of otherRecords) {
-        console.log(`    删除旧 CNAME 记录 → ${rec.content}`);
-        if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
-      }
-
-      console.log(`    创建 A 记录 → ${FALLBACK_IP} (proxied=true)`);
-      if (!dryRun) {
-        await createDnsRecord(zoneId, {
-          type: 'A',
-          name: fallbackFqdn,
-          content: FALLBACK_IP,
-          proxied: true,
-          ttl: 1,
-        }, tokenKey);
-      }
-    }
-  } catch (e) {
-    console.error(`    ✗ Fallback DNS 记录操作失败: ${e.message}`);
-    return { errors: fqdns.length, fallback: false, hostnames: 0 };
-  }
-
-  // ── Step 2: 设置 Fallback Origin ──
-  console.log(`\n  [Fallback Origin] 设置 fallback origin = ${fallbackFqdn}`);
-  try {
-    let current = null;
-    try {
-      current = await getFallbackOrigin(zoneId, tokenKey);
-    } catch (e) {
-      // 首次配置时 fallback origin 不存在，API 返回错误，这是正常的
-      console.log(`    Fallback Origin 尚未设置（首次配置）`);
-    }
-    if (current && current.origin === fallbackFqdn && current.status === 'active') {
-      console.log(`    Fallback Origin 已设置为 ${fallbackFqdn} (active) → 跳过`);
-      fallbackReady = true;
-    } else {
-      console.log(`    当前: origin=${current?.origin || '(无)'}, status=${current?.status || '(无)'}`);
-      if (!dryRun) {
-        await setFallbackOrigin(zoneId, fallbackFqdn, tokenKey);
-        console.log(`    等待 Fallback Origin 状态 Active...`);
-        fallbackReady = await waitForFallbackOriginActive(zoneId, tokenKey);
-        if (fallbackReady) {
-          console.log(`    ✓ Fallback Origin 已 Active`);
-        } else {
-          console.log(`    ⚠ Fallback Origin 未在 ${POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
-        }
-      } else {
-        console.log(`    [DRY_RUN] 跳过实际设置`);
-        fallbackReady = true; // 预览模式假设成功
-      }
-    }
-  } catch (e) {
-    console.error(`    ✗ 设置 Fallback Origin 失败: ${e.message}`);
-    // 继续尝试创建 Custom Hostnames
-  }
-
-  // ── Step 2b: 为每个 prefix 创建 origin CNAME 记录 ──
-  // CF for SaaS 的 custom_origin_server 指向 zone 内的 DNS 记录（必须 DNS only，不能 proxied）
-  // 因此为每个 prefix 创建 o-{prefix}.{zone} CNAME → {origin} (proxied=false, DNS only)
-  // origin CNAME 必须为 DNS only（灰色云），否则 CF Edge 回源时发现 origin 是同 zone 内 proxied 记录，
-  // 形成循环代理，触发 Error 1014
-  const originCnameMap = {}; // { fqdn: originCname }
-  const seenPrefixes = new Set();
-  for (const f of fqdns) {
-    if (seenPrefixes.has(f.prefix)) continue;
-    seenPrefixes.add(f.prefix);
-
-    const originCname = `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
-    const originTarget = f.origin; // e.g. sg-f3b.pages.dev
-    originCnameMap[f.prefix] = originCname;
-
-    console.log(`\n  [Origin CNAME] ${originCname} → ${originTarget} (proxied=false, DNS only)`);
-    try {
-      const existing = await getDnsRecord(zoneId, originCname, 'CNAME', tokenKey);
-      const matched = existing.filter(r => r.content === originTarget && r.proxied === false);
-
-      if (matched.length > 0) {
-        console.log(`    CNAME 已存在且匹配 → 跳过`);
-      } else {
-        // 删除旧记录
-        for (const rec of existing) {
-          console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
-          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
-        }
-        console.log(`    创建 CNAME → ${originTarget} (proxied=false, DNS only)`);
-        if (!dryRun) {
-          await createDnsRecord(zoneId, {
-            type: 'CNAME',
-            name: originCname,
-            content: originTarget,
-            proxied: false,
-            ttl: 1,
-          }, tokenKey);
-        }
-      }
-    } catch (e) {
-      console.error(`    ✗ Origin CNAME 操作失败: ${e.message}`);
-    }
-  }
-
-  // ── Step 2c: 为 Pages 项目添加 origin CNAME 为自定义域名 ──
-  // CF SaaS 回源时 Host header 是 o-{prefix}.{zone}，Pages 项目需要识别该域名
-  // 仅对 *.pages.dev 源站操作，非 Pages 源站（如 answer.07170501.xyz）跳过
-  // 优先使用 wrangler.toml 中显式配置的 pages_project 字段直接定位项目，
-  // 未配置时回退到通过 origin 的 *.pages.dev 域名全量反查
-  console.log(`\n  [Pages Domains] 为 Pages 项目添加 origin CNAME 为自定义域名`);
-  {
-    const seenOrigins = new Set(); // 同一 origin 只需配置一次
-    for (const f of fqdns) {
-      if (seenOrigins.has(f.origin)) continue;
-      seenOrigins.add(f.origin);
-
-      const pagesDomain = extractPagesDomain(f.origin);
-      if (!pagesDomain) {
-        console.log(`    ${f.origin} 非 Pages 源站 → 跳过`);
-        continue;
-      }
-
-      const originCname = originCnameMap[f.prefix] || `${ORIGIN_PREFIX}${f.prefix}.${zoneName}`;
-      console.log(`\n    [Pages] ${pagesDomain} ← ${originCname}`);
-
-      if (dryRun) {
-        console.log(`      [DRY_RUN] 跳过实际添加`);
-        continue;
-      }
-
-      // 优先使用显式 pages_project 查找，回退到 origin 反查
-      let pagesInfo;
-      try {
-        pagesInfo = await findPagesProject(f.origin, f.tokenKey, f.pagesProject);
-      } catch (e) {
-        console.error(`      ✗ 查找 Pages 项目失败: ${e.message}`);
-        continue;
-      }
-
-      if (!pagesInfo) {
-        console.error(`      ✗ 未找到包含 ${pagesDomain} 的 Pages 项目（Token 可能缺 Pages 权限）`);
-        continue;
-      }
-
-      console.log(`      → 项目: ${pagesInfo.projectName} (account: ${pagesInfo.tokenKey})`);
-
-      try {
-        const domains = await listPagesDomains(pagesInfo.accountId, pagesInfo.projectName, pagesInfo.tokenKey);
-        const matched = domains.find(d => d.name === originCname);
-        if (matched) {
-          console.log(`      域名已存在 (status: ${matched.status || 'unknown'}) → 跳过`);
-        } else {
-          console.log(`      添加自定义域名 ${originCname}...`);
-          await addPagesDomain(pagesInfo.accountId, pagesInfo.projectName, originCname, pagesInfo.tokenKey);
-          console.log(`      ✓ 已添加`);
-        }
-      } catch (e) {
-        if (e.message.includes('already') || e.message.includes('已存在') || e.message.includes('duplicate')) {
-          console.log(`      域名已存在 → 跳过`);
-        } else {
-          console.error(`      ✗ 添加失败: ${e.message}`);
-        }
-      }
-    }
-  }
-
-  // ── Step 3: Custom Hostnames ──
-  let hostnameStats = { created: 0, skipped: 0, updated: 0, errors: 0 };
-
-  // 获取现有 Custom Hostnames
-  let existingHostnames = [];
-  try {
-    if (!dryRun) {
-      existingHostnames = await listCustomHostnames(zoneId, tokenKey);
-    }
-  } catch (e) {
-    console.error(`    ✗ 获取现有 Custom Hostnames 失败: ${e.message}`);
-  }
-
-  const existingMap = new Map();
-  for (const ch of existingHostnames) {
-    existingMap.set(ch.hostname, ch);
-  }
-
-  // 收集需要保留的 hostname 集合
-  const desiredHostnames = new Set(fqdns.map(f => f.fqdn));
-
-  // 删除不再需要的 Custom Hostnames
-  for (const [hostname, ch] of existingMap) {
-    if (!desiredHostnames.has(hostname)) {
-      console.log(`\n  [Custom Hostname] ${hostname} — 不在配置中，删除`);
+    const hostnames = await listCustomHostnames(zoneId, tokenKey);
+    for (const ch of hostnames) {
+      console.log(`    删除 Custom Hostname: ${ch.hostname}`);
       if (!dryRun) {
         try {
           await deleteCustomHostname(zoneId, ch.id, tokenKey);
           console.log(`    ✓ 已删除`);
         } catch (e) {
           console.error(`    ✗ 删除失败: ${e.message}`);
+          errors++;
         }
       }
     }
+    if (hostnames.length === 0) {
+      console.log(`    无 Custom Hostnames 需清理`);
+    }
+  } catch (e) {
+    console.error(`    ✗ 获取 Custom Hostnames 失败: ${e.message}`);
+    errors++;
   }
 
-  for (const f of fqdns) {
-    const { fqdn, origin, prefix } = f;
-    // 使用 zone 内的 origin CNAME 作为 custom_origin_server（CF SaaS 要求）
-    const originCname = originCnameMap[prefix] || `${ORIGIN_PREFIX}${prefix}.${zoneName}`;
-    console.log(`\n  [Custom Hostname] ${fqdn} → custom_origin: ${originCname}`);
-
-    const existing = existingMap.get(fqdn);
-
-    if (existing) {
-      // 检查 custom_origin_server 是否匹配（现在用 zone 内 CNAME 而非 pages.dev）
-      if (existing.custom_origin_server === originCname && existing.status === 'active') {
-        console.log(`    Custom Hostname 已存在且 origin 匹配 (active) → 跳过`);
-        hostnameStats.skipped++;
-        continue;
-      }
-
-      // origin 不匹配或状态不 active，需要更新
-      // CF API 不支持直接更新 Custom Hostname 的 custom_origin_server，需要删除重建
-      if (existing.custom_origin_server !== originCname) {
-        console.log(`    Custom Hostname origin 不匹配 (当前: ${existing.custom_origin_server || '(无)'}) → 重建`);
-        if (!dryRun) {
-          try {
-            await deleteCustomHostname(zoneId, existing.id, tokenKey);
-            console.log(`    ✓ 旧 Custom Hostname 已删除`);
-          } catch (e) {
-            console.error(`    ✗ 删除旧 Custom Hostname 失败: ${e.message}`);
-            hostnameStats.errors++;
-            continue;
-          }
-        } else {
-          hostnameStats.updated++;
-          continue;
+  // 2. 清除 Fallback Origin
+  console.log(`\n  [清理] Fallback Origin`);
+  try {
+    const fallback = await getFallbackOrigin(zoneId, tokenKey);
+    if (fallback && fallback.origin) {
+      console.log(`    清除 Fallback Origin: ${fallback.origin}`);
+      if (!dryRun) {
+        // CF API 不支持直接删除 Fallback Origin，设为空字符串来清除
+        try {
+          await setFallbackOrigin(zoneId, '', tokenKey);
+          console.log(`    ✓ 已清除`);
+        } catch (e) {
+          // 有些 zone 可能无法清除，忽略
+          console.log(`    ⚠ 无法清除: ${e.message}`);
         }
-      } else if (existing.status !== 'active') {
-        console.log(`    Custom Hostname 状态: ${existing.status} → 等待 Active...`);
-        if (!dryRun) {
-          const ch = await waitForCustomHostnameActive(zoneId, fqdn, tokenKey);
-          if (ch) {
-            console.log(`    ✓ Custom Hostname 已 Active`);
-            hostnameStats.skipped++;
-          } else {
-            console.log(`    ⚠ 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
-            hostnameStats.errors++;
-          }
-          continue;
-        }
-      }
-    }
-
-    // 创建新的 Custom Hostname（使用 zone 内 origin CNAME）
-    console.log(`    创建 Custom Hostname (custom_origin: ${originCname})`);
-    if (!dryRun) {
-      try {
-        const ch = await createCustomHostname(zoneId, fqdn, originCname, tokenKey);
-        console.log(`    ✓ 已创建 (id: ${ch.id}, status: ${ch.status})`);
-
-        if (ch.status !== 'active') {
-          console.log(`    等待 Custom Hostname 状态 Active...`);
-          const activeCh = await waitForCustomHostnameActive(zoneId, fqdn, tokenKey);
-          if (activeCh) {
-            console.log(`    ✓ Custom Hostname 已 Active`);
-          } else {
-            console.log(`    ⚠ 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active（证书签发中？）`);
-          }
-        }
-        hostnameStats.created++;
-      } catch (e) {
-        console.error(`    ✗ 创建失败: ${e.message}`);
-        hostnameStats.errors++;
       }
     } else {
-      hostnameStats.created++;
+      console.log(`    无 Fallback Origin 需清理`);
     }
+  } catch (e) {
+    console.log(`    无 Fallback Origin 需清理`);
   }
 
-  return {
-    errors: hostnameStats.errors,
-    fallback: fallbackReady,
-    hostnames: hostnameStats.created + hostnameStats.skipped + hostnameStats.updated,
-    hostnameStats,
-  };
+  // 3. 删除 origin CNAME 记录（o-{prefix}.{zone}）
+  console.log(`\n  [清理] Origin CNAME 记录`);
+  const prefixes = [...new Set(fqdns.map(f => f.prefix))];
+  let cleanedCnames = 0;
+  for (const prefix of prefixes) {
+    const originCname = `${ORIGIN_PREFIX}${prefix}.${zoneName}`;
+    try {
+      const recs = await getDnsRecord(zoneId, originCname, 'CNAME', tokenKey);
+      for (const rec of recs) {
+        console.log(`    删除 CNAME: ${originCname} → ${rec.content}`);
+        if (!dryRun) {
+          await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          console.log(`    ✓ 已删除`);
+          cleanedCnames++;
+        }
+      }
+    } catch (e) {
+      console.error(`    ✗ 删除 ${originCname} 失败: ${e.message}`);
+      errors++;
+    }
+  }
+  if (cleanedCnames === 0 && prefixes.length === 0) {
+    console.log(`    无 Origin CNAME 需清理`);
+  }
+
+  // 4. 删除 Fallback Origin DNS 记录（proxy-fallback.{zone}）
+  console.log(`\n  [清理] Fallback DNS 记录`);
+  const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
+  try {
+    const aRecs = await getDnsRecord(zoneId, fallbackFqdn, 'A', tokenKey);
+    for (const rec of aRecs) {
+      console.log(`    删除 A 记录: ${fallbackFqdn} → ${rec.content}`);
+      if (!dryRun) {
+        await deleteDnsRecord(zoneId, rec.id, tokenKey);
+        console.log(`    ✓ 已删除`);
+      }
+    }
+    const cRecs = await getDnsRecord(zoneId, fallbackFqdn, 'CNAME', tokenKey);
+    for (const rec of cRecs) {
+      console.log(`    删除 CNAME: ${fallbackFqdn} → ${rec.content}`);
+      if (!dryRun) {
+        await deleteDnsRecord(zoneId, rec.id, tokenKey);
+        console.log(`    ✓ 已删除`);
+      }
+    }
+    if (aRecs.length === 0 && cRecs.length === 0) {
+      console.log(`    无 Fallback DNS 记录需清理`);
+    }
+  } catch (e) {
+    console.error(`    ✗ 清理 Fallback DNS 失败: ${e.message}`);
+    errors++;
+  }
+
+  return { errors };
 }
 
 // ── 主入口 ──────────────────────────────────────────
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  Cloudflare for SaaS 配置脚本                    ║');
-  console.log('║  Fallback Origin + Custom Hostnames              ║');
+  console.log('║  Pages 自定义域名直绑配置脚本                    ║');
+  console.log('║  替代 CF for SaaS 方案                           ║');
   console.log('╚════════════════════════════════════════════════╝');
 
   if (dryRun) {
     console.log('\n⚠  DRY_RUN 模式 — 仅预览，不执行任何修改\n');
+  }
+  if (skipCleanup) {
+    console.log('\n⚠  SKIP_CLEANUP 模式 — 跳过旧 SaaS 配置清理\n');
   }
 
   // Step 1: 解析配置
@@ -729,7 +677,7 @@ async function main() {
     throw new Error('未检测到任何 FQDN 配置，请检查 workers/ 下的 wrangler.toml');
   }
 
-  // 按 TOKEN_KEY 过滤（CI 多账户 Job 隔离）
+  // 按 TOKEN_KEY 过滤
   const filterTokenKey = process.env.TOKEN_KEY;
   if (filterTokenKey) {
     const before = fqdnList.length;
@@ -745,42 +693,75 @@ async function main() {
 
   // 打印配置概览
   console.log('┌──────────────────────────────────────────────────────────────────┐');
-  console.log('│  Custom Hostname 配置计划                                        │');
+  console.log('│  Pages 直绑配置计划                                              │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
-  console.log('│  FQDN                              →  origin CNAME → Pages       │');
+  console.log('│  FQDN                              →  Pages 源站                  │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
   for (const f of fqdnList) {
-    const originCname = `${ORIGIN_PREFIX}${f.prefix}.${f.zoneName}`;
-    console.log(`│  ${f.fqdn.padEnd(34)} →  ${originCname.padEnd(22)} → ${f.origin.padEnd(18)} │`);
+    console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.origin.padEnd(30)} │`);
   }
   console.log('└──────────────────────────────────────────────────────────────────┘');
 
-  // Step 2: 按 zone 分组
-  const zoneGroups = {};
+  // Step 2: Pages 直绑 — 按 (origin, pagesProject) 去重，同一 Pages 项目只需绑定一次
+  console.log('\n── Pages 自定义域名直绑 ──');
+  const seenOriginProject = new Set(); // "origin:pagesProject" 去重
+  let bindStats = { created: 0, skipped: 0, errors: 0 };
+
   for (const f of fqdnList) {
-    if (!zoneGroups[f.zoneName]) {
-      zoneGroups[f.zoneName] = { tokenKey: f.tokenKey, items: [] };
+    const pagesDomain = extractPagesDomain(f.origin);
+    if (!pagesDomain) {
+      console.log(`\n  [Pages 直绑] ${f.fqdn} → 非 Pages 源站，跳过`);
+      bindStats.skipped++;
+      continue;
     }
-    zoneGroups[f.zoneName].items.push(f);
+
+    // 同一 Pages 项目的每个 FQDN 都需要独立绑定
+    console.log(`\n  [Pages 直绑] ${f.fqdn} → ${pagesDomain}`);
+
+    if (dryRun) {
+      console.log(`    [DRY_RUN] 跳过实际绑定`);
+      bindStats.created++;
+      continue;
+    }
+
+    const result = await bindPagesDomain(f.fqdn, f.origin, f.pagesProject, f.zoneName, f.tokenKey);
+    if (result.error) {
+      bindStats.errors++;
+    } else if (result.result === 'skipped') {
+      bindStats.skipped++;
+    } else {
+      bindStats.created++;
+    }
   }
 
-  // Step 3: 逐 zone 处理
-  let totalErrors = 0;
-  let totalHostnames = 0;
-  let totalFallbacks = 0;
+  // Step 3: 清理旧 SaaS 配置
+  if (!skipCleanup) {
+    console.log('\n── 清理旧 SaaS 配置 ──');
+    const zoneGroups = {};
+    for (const f of fqdnList) {
+      if (!zoneGroups[f.zoneName]) {
+        zoneGroups[f.zoneName] = { tokenKey: f.tokenKey, items: [] };
+      }
+      zoneGroups[f.zoneName].items.push(f);
+    }
 
-  for (const [zoneName, group] of Object.entries(zoneGroups)) {
-    const result = await processZone(zoneName, group.tokenKey, group.items);
-    totalErrors += result.errors;
-    totalHostnames += result.hostnames;
-    if (result.fallback) totalFallbacks++;
+    let cleanupErrors = 0;
+    for (const [zoneName, group] of Object.entries(zoneGroups)) {
+      console.log(`\n━━━ Zone: ${zoneName}${group.tokenKey ? ` (账户: ${group.tokenKey})` : ''} ━━━`);
+      const result = await cleanupSaaSConfig(zoneName, group.tokenKey, group.items);
+      cleanupErrors += result.errors;
+    }
+
+    if (cleanupErrors > 0) {
+      console.log(`\n⚠ 清理过程中有 ${cleanupErrors} 个错误`);
+    }
   }
 
   // 汇总
   console.log('\n━━━ 汇总 ━━━');
-  console.log(`  Zones: ${Object.keys(zoneGroups).length}  Fallback Origins: ${totalFallbacks}  Custom Hostnames: ${totalHostnames}  错误: ${totalErrors}`);
+  console.log(`  Pages 直绑: ${bindStats.created} 新增 / ${bindStats.skipped} 跳过 / ${bindStats.errors} 错误`);
 
-  if (totalErrors > 0) {
+  if (bindStats.errors > 0) {
     process.exit(1);
   }
 }
@@ -795,17 +776,16 @@ if (require.main === module) {
 // ── 导出 ──
 module.exports = {
   buildFqdnOriginMap,
-  processZone,
-  createCustomHostname,
-  deleteCustomHostname,
-  listCustomHostnames,
-  getFallbackOrigin,
-  setFallbackOrigin,
-  waitForFallbackOriginActive,
-  waitForCustomHostnameActive,
+  bindPagesDomain,
+  cleanupSaaSConfig,
   extractPagesDomain,
   findPagesProject,
   findPagesProjectByOrigin,
   listPagesDomains,
   addPagesDomain,
+  deletePagesDomain,
+  listCustomHostnames,
+  deleteCustomHostname,
+  getFallbackOrigin,
+  setFallbackOrigin,
 };

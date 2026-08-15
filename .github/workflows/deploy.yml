@@ -71,7 +71,7 @@ jobs:
         run: node scripts/cleanup-worker-routes.js
 
   # ================================================================
-  #  Job 1：SaaS 配置（账户1）
+  #  Job 1：Pages 直绑 + SaaS 清理（账户1）
   # ================================================================
   setup-saas-1:
     needs: [cleanup-routes-1]
@@ -84,7 +84,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 配置 CF for SaaS（账户1）
+      - name: Pages 直绑自定义域名（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
@@ -92,7 +92,7 @@ jobs:
         run: node scripts/setup-saas.js
 
   # ================================================================
-  #  Job 2：SaaS 配置（账户2）
+  #  Job 2：Pages 直绑 + SaaS 清理（账户2）
   # ================================================================
   setup-saas-2:
     needs: [cleanup-routes-2]
@@ -116,7 +116,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 配置 CF for SaaS（账户2）
+      - name: Pages 直绑自定义域名（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
