@@ -205,8 +205,7 @@ async function deletePagesDomain(accountId, projectName, domainId, tokenKey) {
 
 /**
  * 从 ZONE_MAP 和 wrangler.toml 提取每条 FQDN → origin 映射
- * 返回 [{ fqdn, zoneName, tokenKey, origin, prefix, pagesProject, originFqdn }]
- *   originFqdn = o-{prefix}.{zone} — 回源域名
+ *   - [{ fqdn, zoneName, tokenKey, origin, prefix, pagesProject, isPages, pagesDomain, originFqdn }]
  */
 function buildFqdnOriginMap() {
   const zoneMap = sc.autoDetectZoneMap();
@@ -271,6 +270,8 @@ function buildFqdnOriginMap() {
         console.log(`  ⚠ ${prefix}.${zone.zoneName} 无对应 origin，跳过`);
         continue;
       }
+      const isPages = !!info.pagesProject;
+      const pagesDomain = info.pagesProject ? `${info.pagesProject}.pages.dev` : null;
       const originFqdn = `${ORIGIN_PREFIX}${prefix}.${zone.zoneName}`;
       fqdnList.push({
         fqdn: `${prefix}.${zone.zoneName}`,
@@ -279,6 +280,8 @@ function buildFqdnOriginMap() {
         origin: info.origin,
         prefix,
         pagesProject: info.pagesProject,
+        isPages,       // 是否 Pages 源站（基于 pages_project）
+        pagesDomain,   // {pagesProject}.pages.dev — CNAME 目标
         originFqdn,    // o-{prefix}.{zone}
       });
     }
@@ -288,7 +291,9 @@ function buildFqdnOriginMap() {
 }
 
 /**
- * 从 origin 提取 *.pages.dev 域名
+ * 从 origin 提取 *.pages.dev 域名（用于查找 Pages 项目）
+ * 注意：CNAME 目标应使用 pagesDomain（{pagesProject}.pages.dev），
+ *       而非 origin 中的 pages.dev 子域名（可能不一致）
  */
 function extractPagesDomain(origin) {
   const host = sc.stripProtocol(origin);
@@ -395,13 +400,13 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   }
 
   let errors = 0;
-  const pagesFqdnList = fqdns.filter(f => extractPagesDomain(f.origin));
+  const pagesFqdnList = fqdns.filter(f => f.isPages);
 
   // ── Step 1: o-{prefix} DNS 记录（CNAME → pages.dev, proxied=true） ──
   // 这些是回源域名，Pages 项目会绑定它们
   console.log(`\n  ── Step 1: 回源域名 DNS（o-{prefix} CNAME → pages.dev, proxied=true） ──`);
   for (const f of pagesFqdnList) {
-    const pagesDomain = extractPagesDomain(f.origin);
+    const pagesDomain = f.pagesDomain;
     const originFqdn = f.originFqdn;
     console.log(`    检查 DNS: ${originFqdn} → CNAME ${pagesDomain} (proxied=true)`);
     try {
@@ -474,7 +479,7 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   // 必须在 Custom Hostnames 之前，否则 Custom Hostname 拦截 Pages 验证请求
   console.log(`\n  ── Step 3: Pages 自定义域名（绑定 o-{prefix}） ──`);
   for (const f of pagesFqdnList) {
-    const pagesDomain = extractPagesDomain(f.origin);
+    const pagesDomain = f.pagesDomain;
     if (!pagesDomain) continue;
 
     let pagesInfo;
@@ -670,7 +675,7 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   }
 
   // ── 非 Pages 源站：CNAME → 源站域名 (proxied=false) ──
-  const nonPagesFqdnList = fqdns.filter(f => !extractPagesDomain(f.origin));
+  const nonPagesFqdnList = fqdns.filter(f => !f.isPages);
   if (nonPagesFqdnList.length > 0) {
     console.log(`\n  ── 非 Pages 源站 DNS ──`);
     for (const f of nonPagesFqdnList) {
@@ -744,7 +749,7 @@ async function main() {
   console.log('│  FQDN                              →  回源域名    源站           │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
   for (const f of fqdnList) {
-    const originTag = extractPagesDomain(f.origin) ? 'Pages' : '外部';
+    const originTag = f.isPages ? 'Pages' : '外部';
     console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.originFqdn.padEnd(22)} ${f.origin.padEnd(16)} (${originTag}) │`);
   }
   console.log('└──────────────────────────────────────────────────────────────────┘');

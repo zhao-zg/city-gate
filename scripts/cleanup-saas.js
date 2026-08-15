@@ -132,7 +132,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   }
 
   let errors = 0;
-  const pagesFqdnList = fqdns.filter(f => saas.extractPagesDomain(f.origin));
+  const pagesFqdnList = fqdns.filter(f => f.isPages);
 
   // ── Step 1: 清理 Pages 自定义域名（o-{prefix} 绑定到 Pages 的域名） ──
   console.log(`\n  ── Step 1: Pages 自定义域名（o-{prefix}） ──`);
@@ -155,11 +155,10 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     try {
       const domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
       for (const d of domains) {
-        // 清理 o-{prefix} 开头的域名（新架构）
-        const isOriginDomain = d.name.startsWith(saas.ORIGIN_PREFIX);
-        // 也清理旧的直接绑定（兼容旧架构残留）
+        // 新架构：o-{prefix} 域名是回源必需的，不应在 cleanup 中删除
+        // 只清理旧的直接绑定（兼容旧架构残留：域名直接是 {prefix}.{zone} 格式）
         const isOldDirectBind = pagesFqdnList.some(f => f.fqdn === d.name);
-        if (isOriginDomain || isOldDirectBind) {
+        if (isOldDirectBind) {
           console.log(`    删除 Pages 域名: ${d.name} (project: ${projectName}, status: ${d.status})`);
           if (!dryRun) {
             try {
@@ -172,6 +171,8 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
               }
             }
           }
+        } else if (d.name.startsWith(saas.ORIGIN_PREFIX)) {
+          console.log(`    跳过 o- 前缀域名: ${d.name}（新架构回源必需）`);
         }
       }
     } catch (e) {
