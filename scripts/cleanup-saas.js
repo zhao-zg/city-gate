@@ -133,10 +133,9 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   let errors = 0;
 
   // ── Step 1: 清理 Pages 自定义域名 ──
-  console.log(`\n  ── Pages 自定义域名 ──`);
+  console.log(`\n  ── Step 1: Pages 自定义域名 ──`);
   const pagesFqdnList = fqdns.filter(f => saas.extractPagesDomain(f.origin));
 
-  // 收集需要清理的 (accountId, projectName, tokenKey) 对
   const pagesProjectSet = new Set();
   for (const f of pagesFqdnList) {
     try {
@@ -155,12 +154,19 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     try {
       const domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
       for (const d of domains) {
-        // 只删除属于当前 zone 的 FQDN 的自定义域名
         const isOurs = pagesFqdnList.some(f => f.fqdn === d.name);
         if (isOurs || d.name.includes(zoneName.replace('.', '-'))) {
-          console.log(`    删除 Pages 域名: ${d.name} (project: ${projectName})`);
+          console.log(`    删除 Pages 域名: ${d.name} (project: ${projectName}, status: ${d.status})`);
           if (!dryRun) {
-            await deletePagesDomain(accountId, projectName, d.id, pagesTokenKey);
+            try {
+              await deletePagesDomain(accountId, projectName, d.id, pagesTokenKey);
+            } catch (e) {
+              if (e.message.includes('does not exist') || e.message.includes('not found')) {
+                console.log(`    Pages 域名已不存在 → 忽略`);
+              } else {
+                throw e;
+              }
+            }
           }
         }
       }
@@ -171,7 +177,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   }
 
   // ── Step 2: 清理 Custom Hostnames ──
-  console.log(`\n  ── Custom Hostnames ──`);
+  console.log(`\n  ── Step 2: Custom Hostnames ──`);
   try {
     const chs = await listCustomHostnames(zoneId, tokenKey);
     if (chs.length === 0) {
@@ -189,8 +195,8 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // ── Step 3: 清理 Fallback Origin ──
-  console.log(`\n  ── Fallback Origin ──`);
+  // ── Step 3: 清理 Fallback Origin（必须先删，否则 DNS 记录被引用无法删除） ──
+  console.log(`\n  ── Step 3: Fallback Origin ──`);
   try {
     const fallback = await getFallbackOrigin(zoneId, tokenKey);
     if (fallback && fallback.origin) {
@@ -206,22 +212,41 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // ── Step 4: 清理 Fallback DNS 记录 ──
-  console.log(`\n  ── Fallback DNS 记录 ──`);
+  // ── Step 4: 清理 Fallback DNS 记录（带重试，CF API 可能延迟释放引用） ──
+  console.log(`\n  ── Step 4: Fallback DNS 记录 ──`);
   const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
   try {
+    let fallbackRecordsDeleted = false;
     for (const type of ['A', 'CNAME']) {
       const records = await getDnsRecord(zoneId, fallbackFqdn, type, tokenKey);
       for (const rec of records) {
         console.log(`    删除 ${rec.type} 记录: ${fallbackFqdn} → ${rec.content} (proxied=${rec.proxied})`);
         if (!dryRun) {
-          await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          // 最多重试 3 次，间隔 5 秒
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await deleteDnsRecord(zoneId, rec.id, tokenKey);
+              fallbackRecordsDeleted = true;
+              break;
+            } catch (e) {
+              if (e.message.includes('not allowed') || e.message.includes('fallback origin')) {
+                if (attempt < 3) {
+                  console.log(`    ⚠ 第 ${attempt} 次删除失败（Fallback Origin 引用未释放），5s 后重试...`);
+                  await sleep(5000);
+                } else {
+                  console.log(`    ⚠ 3 次重试仍失败，跳过此记录`);
+                  // 不算错误，setup-saas.js 会覆盖此记录
+                }
+              } else {
+                throw e;
+              }
+            }
+          }
         }
       }
     }
-    if (await getDnsRecord(zoneId, fallbackFqdn, 'A', tokenKey).then(r => r.length === 0).catch(() => true) &&
-        await getDnsRecord(zoneId, fallbackFqdn, 'CNAME', tokenKey).then(r => r.length === 0).catch(() => true)) {
-      console.log(`    无 Fallback DNS 记录`);
+    if (!fallbackRecordsDeleted) {
+      console.log(`    无需清理的 Fallback DNS 记录`);
     }
   } catch (e) {
     console.error(`    ✗ 清理 Fallback DNS 失败: ${e.message}`);
