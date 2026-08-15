@@ -397,13 +397,13 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   }
 
   let errors = 0;
+  const pagesFqdnList = fqdns.filter(f => extractPagesDomain(f.origin));
 
-  // ── Step 1: 配置 Fallback Origin ──
-  console.log(`\n  ── Fallback Origin ──`);
+  // ── Step 1: 配置 Fallback Origin DNS 记录 ──
+  console.log(`\n  ── Step 1: Fallback Origin DNS ──`);
   const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
 
-  // 检查/创建 Fallback Origin DNS 记录（A 记录 192.0.2.1, proxied=true）
-  console.log(`    检查 DNS 记录: ${fallbackFqdn} → A ${FALLBACK_IP} (proxied=true)`);
+  console.log(`    检查 DNS: ${fallbackFqdn} → A ${FALLBACK_IP} (proxied=true)`);
   try {
     const existingA = await getDnsRecord(zoneId, fallbackFqdn, 'A', tokenKey);
     const matchedA = existingA.filter(r => r.content === FALLBACK_IP && r.proxied === true);
@@ -411,18 +411,15 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
     if (matchedA.length > 0) {
       console.log(`    A 记录已匹配 → 跳过`);
     } else {
-      // 删除不匹配的记录
       for (const rec of existingA) {
         console.log(`    删除旧 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
         if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
       }
-      // 也删除可能存在的 CNAME
       const existingCname = await getDnsRecord(zoneId, fallbackFqdn, 'CNAME', tokenKey);
       for (const rec of existingCname) {
         console.log(`    删除旧 CNAME → ${rec.content}`);
         if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
       }
-      // 创建 A 记录
       console.log(`    创建 A 记录 → ${FALLBACK_IP} (proxied=true)`);
       if (!dryRun) {
         await createDnsRecord(zoneId, {
@@ -439,97 +436,14 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // 设置 Fallback Origin
-  console.log(`    设置 Fallback Origin: ${fallbackFqdn}`);
-  try {
-    const currentFallback = await getFallbackOrigin(zoneId, tokenKey);
-    if (currentFallback?.origin === fallbackFqdn) {
-      console.log(`    Fallback Origin 已设置 → 跳过`);
-    } else {
-      if (!dryRun) {
-        await setFallbackOrigin(zoneId, fallbackFqdn, tokenKey);
-        console.log(`    ✓ Fallback Origin 已设置`);
-      } else {
-        console.log(`    [DRY_RUN] 设置 Fallback Origin: ${fallbackFqdn}`);
-      }
-    }
-  } catch (e) {
-    console.error(`    ✗ 设置 Fallback Origin 失败: ${e.message}`);
-    errors++;
-  }
-
-  // ── Step 2: 配置 Custom Hostnames ──
-  console.log(`\n  ── Custom Hostnames ──`);
-
-  // 获取现有 Custom Hostnames
-  let existingCHs = [];
-  try {
-    existingCHs = await listCustomHostnames(zoneId, tokenKey);
-    console.log(`    现有 ${existingCHs.length} 个 Custom Hostnames`);
-  } catch (e) {
-    console.error(`    ✗ 获取 Custom Hostnames 失败: ${e.message}`);
-    errors++;
-  }
-
-  const existingCHMap = new Map();
-  for (const ch of existingCHs) {
-    existingCHMap.set(ch.hostname, ch);
-  }
-
-  // 筛选需要添加的 FQDN（仅 Pages 源站）
-  const pagesFqdnList = fqdns.filter(f => extractPagesDomain(f.origin));
-
-  for (const f of pagesFqdnList) {
-    const existing = existingCHMap.get(f.fqdn);
-    if (existing) {
-      if (existing.status === 'active') {
-        console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active → 跳过`);
-      } else {
-        console.log(`    ${f.fqdn} Custom Hostname 状态: ${existing.status}, 等待激活...`);
-        if (!dryRun) {
-          const ok = await waitForCustomHostnameActive(zoneId, existing.id, f.fqdn, tokenKey);
-          if (ok) {
-            console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active`);
-          } else {
-            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
-          }
-        }
-      }
-    } else {
-      console.log(`    添加 Custom Hostname: ${f.fqdn}`);
-      if (!dryRun) {
-        try {
-          const ch = await addCustomHostname(zoneId, f.fqdn, tokenKey);
-          console.log(`    ✓ 已添加 (id: ${ch.id})`);
-          // 等待激活
-          const ok = await waitForCustomHostnameActive(zoneId, ch.id, f.fqdn, tokenKey);
-          if (ok) {
-            console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active`);
-          } else {
-            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active（可能证书签发中）`);
-          }
-        } catch (e) {
-          if (e.message.includes('already exists') || e.message.includes('duplicate')) {
-            console.log(`    Custom Hostname 已存在 → 继续等待激活`);
-          } else {
-            console.error(`    ✗ 添加 Custom Hostname 失败: ${e.message}`);
-            errors++;
-          }
-        }
-      } else {
-        console.log(`    [DRY_RUN] 添加 Custom Hostname: ${f.fqdn}`);
-      }
-    }
-
-  }
-
-  // ── Step 3: 确保 DNS 记录为 CNAME → pages.dev (proxied=true，让 Pages 自定义域名激活) ──
-  console.log(`\n  ── DNS 记录（CNAME → pages.dev, proxied=true） ──`);
+  // ── Step 2: FQDN DNS 记录（CNAME → pages.dev, proxied=true） ──
+  // 必须先设置 DNS，Pages 域名验证才能通过
+  console.log(`\n  ── Step 2: FQDN DNS（CNAME → pages.dev, proxied=true） ──`);
   for (const f of pagesFqdnList) {
     const pagesDomain = extractPagesDomain(f.origin);
     console.log(`    检查 DNS: ${f.fqdn} → CNAME ${pagesDomain} (proxied=true)`);
     try {
-      // 删除所有旧 A 记录（包括 192.0.2.1 和其他）
+      // 删除所有旧 A 记录
       const existingA = await getDnsRecord(zoneId, f.fqdn, 'A', tokenKey);
       for (const rec of existingA) {
         console.log(`    删除旧 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
@@ -541,12 +455,10 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
       if (matchedCname.length > 0) {
         console.log(`    CNAME 记录已匹配 → 跳过`);
       } else {
-        // 删除不匹配的 CNAME
         for (const rec of existingCname) {
           console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
           if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
         }
-        // 创建 CNAME → pages.dev (proxied=true)
         console.log(`    创建 CNAME → ${pagesDomain} (proxied=true)`);
         if (!dryRun) {
           await createDnsRecord(zoneId, { type: 'CNAME', name: f.fqdn, content: pagesDomain, proxied: true, ttl: 1 }, tokenKey);
@@ -558,8 +470,9 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
     }
   }
 
-  // ── Step 4: 添加 Pages 自定义域名（DNS 已配置好 CNAME，Pages 验证可通过） ──
-  console.log(`\n  ── Pages 自定义域名 ──`);
+  // ── Step 3: Pages 自定义域名（DNS 已配好 CNAME，验证可通过） ──
+  // 必须在添加 Custom Hostnames 之前，否则 Custom Hostname 拦截请求导致 Pages 验证失败
+  console.log(`\n  ── Step 3: Pages 自定义域名 ──`);
   for (const f of pagesFqdnList) {
     const pagesDomain = extractPagesDomain(f.origin);
     if (!pagesDomain) continue;
@@ -580,7 +493,6 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
 
     const { accountId, projectName, tokenKey: pagesTokenKey } = pagesInfo;
 
-    // 检查是否已添加
     let domains = [];
     try {
       domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
@@ -627,6 +539,100 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
         }
       } else {
         console.log(`    [DRY_RUN] 添加 Pages 自定义域名: ${f.fqdn}`);
+      }
+    }
+  }
+
+  // ── Step 4: 设置 Fallback Origin ──
+  console.log(`\n  ── Step 4: Fallback Origin ──`);
+  console.log(`    设置 Fallback Origin: ${fallbackFqdn}`);
+  try {
+    const currentFallback = await getFallbackOrigin(zoneId, tokenKey);
+    if (currentFallback?.origin === fallbackFqdn) {
+      console.log(`    Fallback Origin 已设置 → 跳过`);
+    } else {
+      if (!dryRun) {
+        await setFallbackOrigin(zoneId, fallbackFqdn, tokenKey);
+        console.log(`    ✓ Fallback Origin 已设置`);
+      } else {
+        console.log(`    [DRY_RUN] 设置 Fallback Origin: ${fallbackFqdn}`);
+      }
+    }
+  } catch (e) {
+    // Resource not found 可能是因为 Fallback Origin 不存在（首次设置），尝试直接设置
+    if (e.message.includes('not found')) {
+      console.log(`    Fallback Origin 不存在，尝试创建...`);
+      if (!dryRun) {
+        try {
+          await setFallbackOrigin(zoneId, fallbackFqdn, tokenKey);
+          console.log(`    ✓ Fallback Origin 已设置`);
+        } catch (e2) {
+          console.error(`    ✗ 设置 Fallback Origin 失败: ${e2.message}`);
+          errors++;
+        }
+      }
+    } else {
+      console.error(`    ✗ 设置 Fallback Origin 失败: ${e.message}`);
+      errors++;
+    }
+  }
+
+  // ── Step 5: 添加 Custom Hostnames ──
+  // 必须在 Pages 域名激活之后，否则 Custom Hostname 拦截 Pages 验证请求
+  console.log(`\n  ── Step 5: Custom Hostnames ──`);
+
+  let existingCHs = [];
+  try {
+    existingCHs = await listCustomHostnames(zoneId, tokenKey);
+    console.log(`    现有 ${existingCHs.length} 个 Custom Hostnames`);
+  } catch (e) {
+    console.error(`    ✗ 获取 Custom Hostnames 失败: ${e.message}`);
+    errors++;
+  }
+
+  const existingCHMap = new Map();
+  for (const ch of existingCHs) {
+    existingCHMap.set(ch.hostname, ch);
+  }
+
+  for (const f of pagesFqdnList) {
+    const existing = existingCHMap.get(f.fqdn);
+    if (existing) {
+      if (existing.status === 'active') {
+        console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active → 跳过`);
+      } else {
+        console.log(`    ${f.fqdn} Custom Hostname 状态: ${existing.status}, 等待激活...`);
+        if (!dryRun) {
+          const ok = await waitForCustomHostnameActive(zoneId, existing.id, f.fqdn, tokenKey);
+          if (ok) {
+            console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active`);
+          } else {
+            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
+          }
+        }
+      }
+    } else {
+      console.log(`    添加 Custom Hostname: ${f.fqdn}`);
+      if (!dryRun) {
+        try {
+          const ch = await addCustomHostname(zoneId, f.fqdn, tokenKey);
+          console.log(`    ✓ 已添加 (id: ${ch.id})`);
+          const ok = await waitForCustomHostnameActive(zoneId, ch.id, f.fqdn, tokenKey);
+          if (ok) {
+            console.log(`    ✓ ${f.fqdn} Custom Hostname 已 Active`);
+          } else {
+            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active（可能证书签发中）`);
+          }
+        } catch (e) {
+          if (e.message.includes('already exists') || e.message.includes('duplicate')) {
+            console.log(`    Custom Hostname 已存在 → 继续等待激活`);
+          } else {
+            console.error(`    ✗ 添加 Custom Hostname 失败: ${e.message}`);
+            errors++;
+          }
+        }
+      } else {
+        console.log(`    [DRY_RUN] 添加 Custom Hostname: ${f.fqdn}`);
       }
     }
   }
