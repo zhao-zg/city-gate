@@ -486,8 +486,10 @@ async function processZone(zoneName, tokenKey, fqdns) {
   }
 
   // ── Step 2b: 为每个 prefix 创建 origin CNAME 记录 ──
-  // CF for SaaS 要求 custom_origin_server 必须是 zone 内的 proxied DNS 记录
-  // 因此为每个 prefix 创建 o-{prefix}.{zone} CNAME → {origin} (proxied=true)
+  // CF for SaaS 的 custom_origin_server 指向 zone 内的 DNS 记录（必须 DNS only，不能 proxied）
+  // 因此为每个 prefix 创建 o-{prefix}.{zone} CNAME → {origin} (proxied=false, DNS only)
+  // origin CNAME 必须为 DNS only（灰色云），否则 CF Edge 回源时发现 origin 是同 zone 内 proxied 记录，
+  // 形成循环代理，触发 Error 1014
   const originCnameMap = {}; // { fqdn: originCname }
   const seenPrefixes = new Set();
   for (const f of fqdns) {
@@ -498,10 +500,10 @@ async function processZone(zoneName, tokenKey, fqdns) {
     const originTarget = f.origin; // e.g. sg-f3b.pages.dev
     originCnameMap[f.prefix] = originCname;
 
-    console.log(`\n  [Origin CNAME] ${originCname} → ${originTarget} (proxied=true)`);
+    console.log(`\n  [Origin CNAME] ${originCname} → ${originTarget} (proxied=false, DNS only)`);
     try {
       const existing = await getDnsRecord(zoneId, originCname, 'CNAME', tokenKey);
-      const matched = existing.filter(r => r.content === originTarget && r.proxied === true);
+      const matched = existing.filter(r => r.content === originTarget && r.proxied === false);
 
       if (matched.length > 0) {
         console.log(`    CNAME 已存在且匹配 → 跳过`);
@@ -511,13 +513,13 @@ async function processZone(zoneName, tokenKey, fqdns) {
           console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
           if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
         }
-        console.log(`    创建 CNAME → ${originTarget} (proxied=true)`);
+        console.log(`    创建 CNAME → ${originTarget} (proxied=false, DNS only)`);
         if (!dryRun) {
           await createDnsRecord(zoneId, {
             type: 'CNAME',
             name: originCname,
             content: originTarget,
-            proxied: true,
+            proxied: false,
             ttl: 1,
           }, tokenKey);
         }
