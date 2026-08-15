@@ -25,6 +25,7 @@
  *   MAX_LATENCY_MS（可选） — 延迟上限 ms，超过不测速（默认 300，0=不限制）
  *   SPEED_TEST_MODE（可选）— fast=达标即停 / best=全部测完选最优（默认 fast）
  *   MAX_SPEED_TEST_COUNT（可选）— best 模式下最大测速 IP 数（默认 20）
+ *   SPEED_TEST_HOST（可选）  — 测速域名（默认自动检测，需为 Worker 路由域名）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -48,14 +49,16 @@ const MAX_LATENCY_MS = parseInt(process.env.MAX_LATENCY_MS || '300', 10);
 const SPEED_TEST_MODE = process.env.SPEED_TEST_MODE || 'fast';
 // best 模式下最大测速 IP 数（避免串行测速耗时过长）
 const MAX_SPEED_TEST_COUNT = parseInt(process.env.MAX_SPEED_TEST_COUNT || '20', 10);
+// 测速域名（需为已部署 Worker 的域名，默认自动检测）
+const SPEED_TEST_HOST = process.env.SPEED_TEST_HOST || '';
 
 // ── IP 质量检测 ──────────────────────────────────────
 
 /**
  * 测量 TCP 握手延迟（ms）
- * 默认测 80 端口（与测速端口一致），确保延迟达标的 IP 也能正常测速
+ * 默认测 443 端口（与测速端口一致），确保延迟达标的 IP 也能正常测速
  */
-function measureLatency(ip, port = 80) {
+function measureLatency(ip, port = 443) {
   return new Promise((resolve) => {
     const start = Date.now();
     const socket = new net.Socket();
@@ -119,26 +122,25 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 /**
  * 对指定 IP 做下载速度测试
  *
- * 使用 Cloudflare 官方测速端点 speed.cloudflare.com/__down?bytes=N
- * 通过 IP 直连 + Host 指定 speed.cloudflare.com，下载指定大小的随机数据。
+ * 使用自有 Worker 的 /__down 路由代理 speed.cloudflare.com 测速端点。
+ * 通过 IP 直连 + Host 指定测速域名（已部署 Worker），HTTPS 443 端口访问。
+ * Worker 内部 fetch 到 speed.cloudflare.com 不经过 WAF，443 可正常使用。
  *
  * 策略：
- *   - 使用 HTTP 80 端口（speed.cloudflare.com 的 __down 端点在 443 上可能被 CF WAF 拦截，
- *     XIU2/CloudflareSpeedTest 也建议用 80 端口测速）
+ *   - 使用 HTTPS 443 端口（通过 Worker 代理，不经过 CF WAF 拦截）
  *   - 每次请求 10MB，下载完自动续传，持续满测速时长
  *   - 2 个并发请求提高吞吐量测量准确性
  *   - keep-alive 复用 TCP 连接，避免反复握手开销
  *
  * 返回 { speed_kbps, downloaded, duration_ms, requests } 或 null（失败）
  */
-function testDownloadSpeed(ip, testSec) {
-  const SPEED_HOST = 'speed.cloudflare.com';
+function testDownloadSpeed(ip, testSec, speedHost) {
   // 每次请求下载 10MB 随机数据
   const CHUNK_BYTES = 10 * 1024 * 1024;
   // 测速并发数
   const CONCURRENCY = 2;
-  // 测速端口（80 = HTTP，避免 443 被 CF WAF 拦截）
-  const SPEED_PORT = 80;
+  // 测速端口（443 = HTTPS，通过 Worker 代理不经过 WAF）
+  const SPEED_PORT = 443;
   // 连续失败 5 次直接终止测速
   const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -155,9 +157,10 @@ function testDownloadSpeed(ip, testSec) {
     const pendingTimers = new Set();
 
     // keep-alive agent 复用 TCP 连接
-    const agent = new http.Agent({
+    const agent = new https.Agent({
       keepAlive: true,
       maxSockets: CONCURRENCY,
+      rejectUnauthorized: false,
     });
 
     const cleanup = () => {
@@ -208,14 +211,15 @@ function testDownloadSpeed(ip, testSec) {
       activeRequests++;
       requestCount++;
 
-      const req = http.request({
+      const req = https.request({
         host: ip,
         port: SPEED_PORT,
-        headers: { Host: SPEED_HOST },
+        headers: { Host: speedHost },
         path: `/__down?bytes=${CHUNK_BYTES}`,
         method: 'GET',
         timeout: timeoutMs,
         agent,
+        rejectUnauthorized: false,
       }, (res) => {
         // 非 200 响应：等流结束再递减 activeRequests，避免竞态
         if (res.statusCode !== 200) {
@@ -754,10 +758,14 @@ async function main() {
 
   const isBestMode = SPEED_TEST_MODE === 'best';
 
+  // 确定测速域名：优先使用环境变量，否则用 testHost（已部署 Worker 的域名）
+  const speedHost = SPEED_TEST_HOST || testHost;
+
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  第二步：测速筛选');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`  模式: ${isBestMode ? 'best（全部测完选最优）' : 'fast（达标即停）'}`);
+  console.log(`  测速域名: ${speedHost}（HTTPS 443，Worker 代理）`);
   console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
   console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
   console.log(`  需求数量: ${needCount} 个达标 IP`);
@@ -778,7 +786,7 @@ async function main() {
     if (!isBestMode && speedResults.length >= needCount) break;
 
     console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
-    const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
+    const result = await testDownloadSpeed(ip, SPEED_TEST_SEC, speedHost);
     testedIps.add(ip);
 
     if (result) {
@@ -821,7 +829,7 @@ async function main() {
           }
 
           console.log(`  ▸ ${ip}（候选，延迟 ${latency}ms）测速...`);
-          const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
+          const result = await testDownloadSpeed(ip, SPEED_TEST_SEC, speedHost);
           testedIps.add(ip);
 
           if (result) {

@@ -30,6 +30,8 @@ services:
       - MAX_LATENCY_MS=${MAX_LATENCY_MS:-300}
       - SPEED_TEST_MODE=${SPEED_TEST_MODE:-fast}
       - MAX_SPEED_TEST_COUNT=${MAX_SPEED_TEST_COUNT:-20}
+      # ── 测速域名（留空=自动检测，需为已部署 Worker 的域名） ──
+      - SPEED_TEST_HOST=${SPEED_TEST_HOST:-}
       # ── Zone 配置覆盖（可选，JSON 字符串，留空则使用镜像内 wrangler.toml） ──
       - ZONE_CONFIG_JSON=${ZONE_CONFIG_JSON:-}
     volumes:

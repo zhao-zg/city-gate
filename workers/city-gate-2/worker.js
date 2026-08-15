@@ -22,8 +22,27 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const hostname = url.hostname;
+    const pathname = url.pathname;
 
-    // 0. CORS 预检（OPTIONS）
+    // 0a. 测速代理路由 — 代理 speed.cloudflare.com/__down
+    // 通过 Worker 内部 fetch 访问，不经过 WAF，443 端口可用
+    if (pathname === '/__down' || pathname.startsWith('/__down?')) {
+      const bytes = url.searchParams.get('bytes') || '104857600'; // 默认 100MB
+      const targetUrl = `https://speed.cloudflare.com/__down?bytes=${bytes}`;
+      const headers = new Headers();
+      headers.set('referer', 'https://speed.cloudflare.com/');
+      const resp = await fetch(targetUrl, { headers });
+      const respHeaders = new Headers(resp.headers);
+      respHeaders.set('Access-Control-Allow-Origin', '*');
+      respHeaders.set('Cache-Control', 'no-store');
+      return new Response(resp.body, {
+        status: resp.status,
+        statusText: resp.statusText,
+        headers: respHeaders,
+      });
+    }
+
+    // 0b. CORS 预检（OPTIONS）
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,

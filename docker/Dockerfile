@@ -38,6 +38,8 @@ ENV SPEED_TEST_SEC="2"
 ENV MAX_LATENCY_MS="300"
 ENV SPEED_TEST_MODE="fast"
 ENV MAX_SPEED_TEST_COUNT="20"
+# 测速域名（留空=自动检测，需为已部署 Worker 的域名，Worker 需有 /__down 路由）
+ENV SPEED_TEST_HOST=""
 # Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
 ENV ZONE_CONFIG_JSON=""
 
