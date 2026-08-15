@@ -54,7 +54,7 @@ async function cfApi(pathSuffix, tokenKey) {
  */
 async function fetchPagesDomains(tokenKey) {
   const accountId = await getAccountId(tokenKey);
-  const json = await cfApi(`/accounts/${accountId}/pages/projects?per_page=100`, tokenKey);
+  const json = await cfApi(`/accounts/${accountId}/pages/projects`, tokenKey);
   const map = new Map();
   for (const project of json.result || []) {
     if (project.name && project.subdomain) {
@@ -123,7 +123,11 @@ async function processWorkerDir(dir) {
   }
 
   const workerName = parseWorkerName(tomlText) || dir;
-  const tokenKey = sc.WORKER_TOKEN_KEYS[workerName] || 'default';
+
+  // 统一使用 CLOUDFLARE_API_TOKEN（CI 中每个 job 只配置对应账户的 token）
+  // 不通过 WORKER_TOKEN_KEYS 映射，因为账户2的 job 中
+  // CLOUDFLARE_API_TOKEN 就是账户2的 token，而 CLOUDFLARE_API_TOKEN_2 未设置
+  const tokenKey = 'default';
   console.log(`  Worker: ${workerName}, tokenKey: ${tokenKey}`);
 
   // 查询 Pages 项目域名
