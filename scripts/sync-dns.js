@@ -213,13 +213,15 @@ function checkConnectivity(fqdn) {
 
 /**
  * 从优选域名池收集所有可用 IP，检测质量后排序
+ * 池内 IP 经 1034 验证 + /24 去重后数量足够时跳过 cfIpTop20，
+ * 不足时才拉取远程 Top20 补充候选。
  * 返回按延迟排序的可用 IP 列表 [{ ip, latency, source }]
  */
-async function buildIpPool(testHost) {
+async function buildIpPool(testHost, needCount) {
   console.log('\n── IP 池构建 ──');
   console.log(`  测试 Host: ${testHost}`);
   console.log(`  去重前缀: /${IP_DEDUP_PREFIX}`);
-  console.log(`  每 zone: ${IP_PER_ZONE} 个 IP\n`);
+  console.log(`  每 zone: ${IP_PER_ZONE} 个 IP，共需 ${needCount} 个\n`);
 
   // 第1步：从 CNAME_POOL 收集 IP
   console.log('  [1] 从优选域名池解析 IP...');
@@ -235,49 +237,33 @@ async function buildIpPool(testHost) {
     console.log(`    ${domain.padEnd(32)} → ${ips.length} 个 IP`);
   }
 
-  // 第2步：从 cfIpTop20 补充 IP
-  console.log(`\n  [2] 从 cfIpTop20 补充 IP...`);
-  try {
-    const top20 = await sc.fetchCfTop20();
-    for (const domain of top20) {
-      const ips = await sc.resolveIps(domain);
-      for (const ip of ips) {
-        if (!sc.is1034Ip(ip)) {
-          rawIps.add(ip);
-        }
-      }
-    }
-    console.log(`    cfIpTop20 补充后总计: ${rawIps.size} 个唯一 IP`);
-  } catch (e) {
-    console.log(`    cfIpTop20 拉取失败: ${e.message}，继续用池内 IP`);
-  }
-
   if (rawIps.size === 0) {
-    throw new Error('未能收集到任何 IP！');
+    throw new Error('未能从优选域名池收集到任何 IP！');
   }
 
-  // 第3步：逐 IP 验证 1034 + 挑战页 + 延迟
-  console.log(`\n  [3] 逐 IP 质量检测（${rawIps.size} 个）...`);
-  const ipList = [...rawIps];
+  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟
+  console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个）...`);
 
-  const results = await Promise.all(
-    ipList.map(async (ip) => {
-      const check = await sc.testIp1034(ip, testHost);
-      if (!check.ok) {
-        return { ip, ok: false, reason: check.reason, latency: null };
-      }
+  async function checkIpBatch(ipSet) {
+    const ipList = [...ipSet];
+    return await Promise.all(
+      ipList.map(async (ip) => {
+        const check = await sc.testIp1034(ip, testHost);
+        if (!check.ok) {
+          return { ip, ok: false, reason: check.reason, latency: null };
+        }
+        const latency = await measureLatency(ip);
+        if (latency === null) {
+          return { ip, ok: false, reason: 'TCP 连接失败', latency: null };
+        }
+        return { ip, ok: true, reason: check.reason, latency };
+      })
+    );
+  }
 
-      const latency = await measureLatency(ip);
-      if (latency === null) {
-        return { ip, ok: false, reason: 'TCP 连接失败', latency: null };
-      }
-
-      return { ip, ok: true, reason: check.reason, latency };
-    })
-  );
-
-  const good = results.filter(r => r.ok);
-  const bad = results.filter(r => !r.ok);
+  let results = await checkIpBatch(rawIps);
+  let good = results.filter(r => r.ok);
+  let bad = results.filter(r => !r.ok);
 
   for (const r of results) {
     const status = r.ok ? '✓' : '✗';
@@ -287,19 +273,57 @@ async function buildIpPool(testHost) {
 
   console.log(`\n  检测结果: 可用 ${good.length} / 不可用 ${bad.length}`);
 
-  if (good.length === 0) {
-    throw new Error('没有可用的 IP！');
-  }
-
-  // 第4步：同 /24 去重，按延迟排序
-  console.log(`\n  [4] 同 /${IP_DEDUP_PREFIX} 去重...`);
-  const deduped = dedupIps(good);
+  // 第3步：同 /24 去重，按延迟排序
+  console.log(`\n  [3] 同 /${IP_DEDUP_PREFIX} 去重...`);
+  let deduped = dedupIps(good);
   console.log(`  去重后: ${deduped.length} 个 IP（按延迟排序）`);
   for (const { ip, latency } of deduped.slice(0, 20)) {
     console.log(`    ${ip.padEnd(18)} ${latency}ms`);
   }
   if (deduped.length > 20) {
     console.log(`    ... 共 ${deduped.length} 个`);
+  }
+
+  // 第4步：去重后数量不足时才从 cfIpTop20 补充
+  if (deduped.length < needCount) {
+    console.log(`\n  [4] 池内仅 ${deduped.length} 个 IP，不足 ${needCount}，从 cfIpTop20 补充...`);
+    try {
+      const top20 = await sc.fetchCfTop20();
+      // 收集新候选 IP（排除已检测过的）
+      const existingIps = new Set(results.map(r => r.ip));
+      const newIps = new Set();
+      for (const domain of top20) {
+        const ips = await sc.resolveIps(domain);
+        for (const ip of ips) {
+          if (!sc.is1034Ip(ip) && !existingIps.has(ip)) {
+            newIps.add(ip);
+          }
+        }
+      }
+      console.log(`    cfIpTop20 新增候选: ${newIps.size} 个 IP`);
+
+      if (newIps.size > 0) {
+        const newResults = await checkIpBatch(newIps);
+        for (const r of newResults) {
+          const status = r.ok ? '✓' : '✗';
+          const latencyStr = r.ok ? `${r.latency}ms` : '';
+          console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? '' : '— ' + r.reason}`);
+        }
+        const newGood = newResults.filter(r => r.ok);
+        results = [...results, ...newResults];
+        good = [...good, ...newGood];
+        deduped = dedupIps(good);
+        console.log(`    补充后去重: ${deduped.length} 个 IP`);
+      }
+    } catch (e) {
+      console.log(`    cfIpTop20 拉取失败: ${e.message}，继续用现有 IP`);
+    }
+  } else {
+    console.log(`\n  [4] 池内 ${deduped.length} 个 IP >= 需求 ${needCount}，跳过 cfIpTop20`);
+  }
+
+  if (deduped.length === 0) {
+    throw new Error('没有可用的 IP！');
   }
 
   return deduped;
@@ -561,21 +585,119 @@ async function main() {
   }
 
   // ═══════════════════════════════════════════════════
-  // 第一步：同步 DNS（A 记录）
+  // 第一步：构建 IP 池（1034 验证 + 延迟排序 + /24 去重）
   // ═══════════════════════════════════════════════════
 
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  第一步：同步 DNS（A 记录）');
+  console.log('  第一步：构建 IP 池（1034 + 延迟 + /24 去重）');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  const ipPool = await buildIpPool(testHost);
+  const needCount = poolZones.length * IP_PER_ZONE;
+  const ipPool = await buildIpPool(testHost, needCount);
 
-  if (ipPool.length < poolZones.length) {
-    console.log(`\n  ⚠  IP 池仅 ${ipPool.length} 个，少于 zone 数 ${poolZones.length}，将跨 zone 复用`);
+  if (ipPool.length < needCount) {
+    console.log(`\n  ⚠  IP 池 ${ipPool.length} 个，需求 ${needCount} 个（将跨 zone 复用）`);
   }
 
+  // ═══════════════════════════════════════════════════
+  // 第二步：测速筛选（串行测速，从低延迟开始，达标即保留）
+  // ═══════════════════════════════════════════════════
+
+  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  第二步：测速筛选');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
+  console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
+  console.log(`  需求数量: ${needCount} 个达标 IP\n`);
+
+  const speedResults = []; // { ip, latency, speed_kbps }
+  const testedIps = new Set();
+
+  for (const { ip, latency } of ipPool) {
+    if (speedResults.length >= needCount) break;
+
+    console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
+    const result = await testDownloadSpeed(ip, testHost, SPEED_TEST_SEC);
+    testedIps.add(ip);
+
+    if (result) {
+      const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
+      console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
+      if (result.speed_kbps >= MIN_SPEED_KBPS) {
+        speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
+      }
+    } else {
+      console.log(`    ✗ 测速失败`);
+    }
+  }
+
+  console.log(`\n  测速结果: ${speedResults.length}/${needCount} 达标`);
+
+  // 池内 IP 测完仍不足，从 cfIpTop20 补充候选再测速
+  if (speedResults.length < needCount) {
+    console.log(`\n  ⚠ 池内达标 IP 不足，从 cfIpTop20 补充候选...`);
+    try {
+      const top20 = await sc.fetchCfTop20();
+      for (const domain of top20) {
+        if (speedResults.length >= needCount) break;
+        const ips = await sc.resolveIps(domain);
+        for (const ip of ips) {
+          if (speedResults.length >= needCount) break;
+          if (testedIps.has(ip) || sc.is1034Ip(ip)) continue;
+
+          // 先快速验证 1034
+          const check = await sc.testIp1034(ip, testHost);
+          if (!check.ok) { testedIps.add(ip); continue; }
+
+          const latency = await measureLatency(ip);
+          if (latency === null) { testedIps.add(ip); continue; }
+
+          console.log(`  ▸ ${ip}（候选，延迟 ${latency}ms）测速...`);
+          const result = await testDownloadSpeed(ip, testHost, SPEED_TEST_SEC);
+          testedIps.add(ip);
+
+          if (result) {
+            const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
+            console.log(`    ${mark} ${result.speed_kbps} KB/s`);
+            if (result.speed_kbps >= MIN_SPEED_KBPS) {
+              speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
+            }
+          } else {
+            console.log(`    ✗ 测速失败`);
+          }
+        }
+      }
+      console.log(`  补充后: ${speedResults.length}/${needCount} 达标`);
+    } catch (e) {
+      console.log(`  cfIpTop20 拉取失败: ${e.message}，用现有达标 IP 继续`);
+    }
+  }
+
+  if (speedResults.length === 0) {
+    throw new Error('没有测速达标的 IP！');
+  }
+
+  if (speedResults.length < needCount) {
+    console.log(`\n  ⚠ 仅 ${speedResults.length} 个达标 IP，不足 ${needCount}，将跨 zone 复用`);
+  }
+
+  // 测速结果一览
+  console.log('\n  测速达标 IP:');
+  for (const r of speedResults) {
+    console.log(`    ✓ ${r.ip.padEnd(18)} ${r.speed_kbps} KB/s  (${r.latency}ms)`);
+  }
+
+  // ═══════════════════════════════════════════════════
+  // 第三步：同步 DNS（分配 + 写入 A 记录）
+  // ═══════════════════════════════════════════════════
+
+  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  第三步：同步 DNS（分配 + 写入 A 记录）');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  const finalPool = speedResults.map(r => ({ ip: r.ip, latency: r.latency }));
   console.log('\n── Zone IP 分配 ──');
-  const assignments = assignIpsToZones(filteredZones, ipPool, IP_PER_ZONE);
+  const assignments = assignIpsToZones(filteredZones, finalPool, IP_PER_ZONE);
   printAssignmentPlan(assignments);
 
   const syncStats = await processARecords(assignments);
@@ -584,11 +706,11 @@ async function main() {
   console.log(`  创建: ${syncStats.created}  删除: ${syncStats.deleted}  跳过: ${syncStats.skipped}  错误: ${syncStats.errors}`);
 
   // ═══════════════════════════════════════════════════
-  // 第二步：检验 DNS（连通性检测）
+  // 第四步：检验 DNS（连通性检测）
   // ═══════════════════════════════════════════════════
 
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  第二步：检验 DNS（连通性检测）');
+  console.log('  第四步：检验 DNS（连通性检测）');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   // 构建 FQDN 列表
@@ -665,144 +787,15 @@ async function main() {
   console.log(`\n  连通性汇总: 正常 ${connOk}  异常 ${connBad}  跳过 ${connSkip}`);
 
   // ═══════════════════════════════════════════════════
-  // 第三步：测速（下载速度测试）
-  // ═══════════════════════════════════════════════════
-
-  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  第三步：测速（下载速度测试）');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
-  console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
-
-  // 收集所有 zone 的 A 记录 IP（去重）
-  const ipSpeedMap = new Map(); // ip → speed result
-  const speedReplacements = []; // 需要替换的 { fqdn, oldIp, newIp }
-
-  for (const zone of poolZones) {
-    const zoneFqdns = [];
-    for (const prefix of zone.names) {
-      zoneFqdns.push(`${prefix}.${zone.zoneName}`);
-    }
-
-    // 查询该 zone 当前 A 记录
-    let zoneId;
-    try {
-      zoneId = await sc.getZoneId(zone.zoneName, zone.tokenKey);
-    } catch (e) {
-      console.error(`\n  ✗ Zone ${zone.zoneName} 获取 ID 失败: ${e.message}`);
-      continue;
-    }
-
-    for (const fqdn of zoneFqdns) {
-      let records;
-      try {
-        records = await sc.getDnsRecords(zoneId, fqdn, zone.tokenKey);
-      } catch (e) {
-        console.error(`  ✗ ${fqdn} 查询失败: ${e.message}`);
-        continue;
-      }
-
-      const aRecords = records.filter(r => r.type === 'A');
-      if (aRecords.length === 0) continue;
-
-      console.log(`\n  ▸ ${fqdn}（A 记录: ${aRecords.map(r => r.content).join(', ')}）`);
-
-      for (const rec of aRecords) {
-        const ip = rec.content;
-
-        // 缓存测速结果
-        if (!ipSpeedMap.has(ip)) {
-          console.log(`    测速 ${ip}...`);
-          const result = await testDownloadSpeed(ip, fqdn, SPEED_TEST_SEC);
-          if (result) {
-            ipSpeedMap.set(ip, result);
-            const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-            console.log(`    ${mark} ${ip}: ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
-          } else {
-            ipSpeedMap.set(ip, null);
-            console.log(`    ✗ ${ip}: 测速失败`);
-          }
-        }
-
-        // 不达标 → 从候选池中找替换
-        const speedResult = ipSpeedMap.get(ip);
-        if (speedResult && speedResult.speed_kbps < MIN_SPEED_KBPS) {
-          console.log(`    ⚠ ${ip} 不达标（${speedResult.speed_kbps} < ${MIN_SPEED_KBPS} KB/s），查找替换...`);
-
-          // 从 ipPool 中按延迟排序找候选（排除已分配给该 zone 的 IP）
-          const assignedIps = new Set(aRecords.map(r => r.content));
-          const candidate = ipPool.find(c => !assignedIps.has(c.ip) && c.ip !== ip);
-
-          if (candidate) {
-            // 先测候选的速度
-            if (!ipSpeedMap.has(candidate.ip)) {
-              console.log(`    候选 ${candidate.ip} 测速...`);
-              const candResult = await testDownloadSpeed(candidate.ip, fqdn, SPEED_TEST_SEC);
-              ipSpeedMap.set(candidate.ip, candResult);
-              if (candResult) {
-                console.log(`    候选 ${candidate.ip}: ${candResult.speed_kbps} KB/s`);
-              } else {
-                console.log(`    候选 ${candidate.ip}: 测速失败`);
-              }
-            }
-
-            const candSpeed = ipSpeedMap.get(candidate.ip);
-            if (candSpeed && candSpeed.speed_kbps >= MIN_SPEED_KBPS) {
-              console.log(`    ✓ 替换: ${ip} → ${candidate.ip}（${candSpeed.speed_kbps} KB/s）`);
-              speedReplacements.push({ fqdn, zoneId, tokenKey: zone.tokenKey, oldIp: ip, newIp: candidate.ip, recordId: rec.id });
-            } else {
-              console.log(`    ✗ 候选 ${candidate.ip} 也不达标，保留原 IP`);
-            }
-          } else {
-            console.log(`    ✗ 无更多候选 IP 可替换`);
-          }
-        }
-      }
-    }
-  }
-
-  // 执行替换
-  if (speedReplacements.length > 0) {
-    console.log('\n── 执行测速不达标 IP 替换 ──');
-    const dryRun = process.env.DRY_RUN === '1';
-
-    for (const rep of speedReplacements) {
-      console.log(`  ${rep.fqdn}: ${rep.oldIp} → ${rep.newIp}`);
-      if (!dryRun) {
-        try {
-          await deleteDnsRecord(rep.zoneId, rep.recordId, rep.tokenKey);
-          await createARecord(rep.zoneId, rep.fqdn, rep.newIp, rep.tokenKey);
-          console.log(`    ✓ 替换完成`);
-        } catch (e) {
-          console.error(`    ✗ 替换失败: ${e.message}`);
-        }
-      }
-    }
-  }
-
-  // ═══════════════════════════════════════════════════
   // 最终汇总
   // ═══════════════════════════════════════════════════
 
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  最终汇总');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`  IP 池:   达标 ${speedResults.length}/${needCount}（去重后 ${ipPool.length} 个候选）`);
   console.log(`  DNS 同步: 创建 ${syncStats.created}  删除 ${syncStats.deleted}  跳过 ${syncStats.skipped}  错误 ${syncStats.errors}`);
   console.log(`  连通性:   正常 ${connOk}  异常 ${connBad}  跳过 ${connSkip}`);
-  console.log(`  测速替换: ${speedReplacements.length} 个 IP`);
-
-  // 测速结果一览
-  if (ipSpeedMap.size > 0) {
-    console.log('\n  测速结果:');
-    for (const [ip, result] of ipSpeedMap) {
-      if (result) {
-        const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-        console.log(`    ${mark} ${ip.padEnd(18)} ${result.speed_kbps} KB/s`);
-      } else {
-        console.log(`    ✗ ${ip.padEnd(18)} 测速失败`);
-      }
-    }
-  }
 
   const hasError = syncStats.errors > 0 || connBad > 0;
   if (hasError) {
