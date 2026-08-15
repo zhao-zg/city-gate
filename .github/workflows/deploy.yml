@@ -71,7 +71,7 @@ jobs:
         run: node scripts/cleanup-worker-routes.js
 
   # ================================================================
-  # Job 1：SaaS 配置（Fallback Origin + Custom Hostnames + Origin Rules）（账户1）
+  # Job 1：SaaS 配置（Fallback Origin + Custom Hostnames + Pages 域名激活）（账户1）
   # ================================================================
   setup-saas-1:
     needs: [cleanup-routes-1]
@@ -84,7 +84,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 配置 SaaS + Origin Rules（账户1）
+      - name: 清理旧 SaaS 资源（账户1）
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+          TOKEN_KEY: default
+        run: node scripts/cleanup-saas.js
+      - name: 配置 SaaS + Pages 域名激活（账户1）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
@@ -92,7 +98,7 @@ jobs:
         run: node scripts/setup-saas.js
 
   # ================================================================
-  # Job 2：SaaS 配置（Fallback Origin + Custom Hostnames + Origin Rules）（账户2）
+  # Job 2：SaaS 配置（Fallback Origin + Custom Hostnames + Pages 域名激活）（账户2）
   # ================================================================
   setup-saas-2:
     needs: [cleanup-routes-2]
@@ -116,7 +122,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 配置 SaaS + Origin Rules（账户2）
+      - name: 清理旧 SaaS 资源（账户2）
+        if: steps.check.outputs.skip == 'false'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+          TOKEN_KEY: account2
+        run: node scripts/cleanup-saas.js
+      - name: 配置 SaaS + Pages 域名激活（账户2）
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

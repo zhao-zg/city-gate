@@ -5,9 +5,9 @@
  * 架构：
  *   1. Fallback Origin：proxy-fallback.{zone} → A 192.0.2.1 (proxied=true)
  *   2. Custom Hostnames：为每个 FQDN 添加 Custom Hostname，回源到 Fallback Origin
- *   3. Pages 自定义域名：为每个 Pages FQDN 添加自定义域名到 Pages 项目（proxied=true 激活）
- *   4. 用户域名 DNS：先设 A 记录 192.0.2.1 (proxied=true) 让 Pages 验证激活，
- *      激活后由 sync-dns.js 改为 A 记录指向优选 CF 边缘 IP (proxied=false, DNS only)
+ *   3. DNS 记录（激活用）：FQDN → CNAME → xxx.pages.dev (proxied=true)
+ *      Pages 自定义域名通过 CNAME 验证激活，识别 Host header
+ *   4. 运行时由 sync-dns.js 改为 A 优选 IP (proxied=false, DNS only)
  *
  * 流程：
  *   用户访问 sg.1189.dpdns.org
@@ -523,35 +523,111 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
 
   }
 
-  // ── Step 3: 确保 DNS 记录为 proxied=true（让 Pages 自定义域名激活） ──
-  console.log(`\n  ── DNS 记录（临时 proxied=true） ──`);
+  // ── Step 3: 确保 DNS 记录为 CNAME → pages.dev (proxied=true，让 Pages 自定义域名激活) ──
+  console.log(`\n  ── DNS 记录（CNAME → pages.dev, proxied=true） ──`);
   for (const f of pagesFqdnList) {
-    console.log(`    检查 DNS: ${f.fqdn} → A ${FALLBACK_IP} (proxied=true)`);
+    const pagesDomain = extractPagesDomain(f.origin);
+    console.log(`    检查 DNS: ${f.fqdn} → CNAME ${pagesDomain} (proxied=true)`);
     try {
+      // 删除所有旧 A 记录（包括 192.0.2.1 和其他）
       const existingA = await getDnsRecord(zoneId, f.fqdn, 'A', tokenKey);
-      const matchedA = existingA.filter(r => r.content === FALLBACK_IP && r.proxied === true);
-      if (matchedA.length > 0) {
-        console.log(`    A 记录已匹配 → 跳过`);
+      for (const rec of existingA) {
+        console.log(`    删除旧 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
+        if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+      }
+      // 检查现有 CNAME 记录
+      const existingCname = await getDnsRecord(zoneId, f.fqdn, 'CNAME', tokenKey);
+      const matchedCname = existingCname.filter(r => r.content === pagesDomain && r.proxied === true);
+      if (matchedCname.length > 0) {
+        console.log(`    CNAME 记录已匹配 → 跳过`);
       } else {
-        // 删除不匹配的记录
-        for (const rec of existingA) {
-          console.log(`    删除旧 A 记录 → ${rec.content} (proxied=${rec.proxied})`);
-          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
-        }
-        // 也删除可能存在的 CNAME
-        const existingCname = await getDnsRecord(zoneId, f.fqdn, 'CNAME', tokenKey);
+        // 删除不匹配的 CNAME
         for (const rec of existingCname) {
-          console.log(`    删除旧 CNAME → ${rec.content}`);
+          console.log(`    删除旧 CNAME → ${rec.content} (proxied=${rec.proxied})`);
           if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
         }
-        console.log(`    创建 A 记录 → ${FALLBACK_IP} (proxied=true)`);
+        // 创建 CNAME → pages.dev (proxied=true)
+        console.log(`    创建 CNAME → ${pagesDomain} (proxied=true)`);
         if (!dryRun) {
-          await createDnsRecord(zoneId, { type: 'A', name: f.fqdn, content: FALLBACK_IP, proxied: true, ttl: 1 }, tokenKey);
+          await createDnsRecord(zoneId, { type: 'CNAME', name: f.fqdn, content: pagesDomain, proxied: true, ttl: 1 }, tokenKey);
         }
       }
     } catch (e) {
       console.error(`    ✗ DNS 配置失败: ${e.message}`);
       errors++;
+    }
+  }
+
+  // ── Step 4: 添加 Pages 自定义域名（DNS 已配置好 CNAME，Pages 验证可通过） ──
+  console.log(`\n  ── Pages 自定义域名 ──`);
+  for (const f of pagesFqdnList) {
+    const pagesDomain = extractPagesDomain(f.origin);
+    if (!pagesDomain) continue;
+
+    let pagesInfo;
+    try {
+      pagesInfo = await findPagesProject(f.origin, f.tokenKey, f.pagesProject);
+    } catch {
+      console.error(`    ✗ 找不到 Pages 项目: ${pagesDomain}`);
+      errors++;
+      continue;
+    }
+    if (!pagesInfo) {
+      console.error(`    ✗ 找不到 Pages 项目: ${pagesDomain}`);
+      errors++;
+      continue;
+    }
+
+    const { accountId, projectName, tokenKey: pagesTokenKey } = pagesInfo;
+
+    // 检查是否已添加
+    let domains = [];
+    try {
+      domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
+    } catch (e) {
+      console.error(`    ✗ 获取 Pages 域名列表失败: ${e.message}`);
+      errors++;
+      continue;
+    }
+
+    const existing = domains.find(d => d.name === f.fqdn);
+    if (existing) {
+      if (existing.status === 'active') {
+        console.log(`    ✓ ${f.fqdn} Pages 域名已 Active → 跳过`);
+      } else {
+        console.log(`    ${f.fqdn} Pages 域名状态: ${existing.status}, 等待激活...`);
+        if (!dryRun) {
+          const ok = await waitForPagesDomainActive(accountId, projectName, f.fqdn, pagesTokenKey);
+          if (ok) {
+            console.log(`    ✓ ${f.fqdn} Pages 域名已 Active`);
+          } else {
+            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active`);
+          }
+        }
+      }
+    } else {
+      console.log(`    添加 Pages 自定义域名: ${f.fqdn} (project: ${projectName})`);
+      if (!dryRun) {
+        try {
+          await addPagesDomain(accountId, projectName, f.fqdn, pagesTokenKey);
+          console.log(`    ✓ 已添加，等待激活...`);
+          const ok = await waitForPagesDomainActive(accountId, projectName, f.fqdn, pagesTokenKey);
+          if (ok) {
+            console.log(`    ✓ ${f.fqdn} Pages 域名已 Active`);
+          } else {
+            console.log(`    ⚠ ${f.fqdn} 未在 ${CH_POLL_TIMEOUT_MS / 1000}s 内变为 Active（可能需要手动验证 DNS）`);
+          }
+        } catch (e) {
+          if (e.message.includes('already exists') || e.message.includes('duplicate')) {
+            console.log(`    Pages 域名已存在 → 继续`);
+          } else {
+            console.error(`    ✗ 添加 Pages 域名失败: ${e.message}`);
+            errors++;
+          }
+        }
+      } else {
+        console.log(`    [DRY_RUN] 添加 Pages 自定义域名: ${f.fqdn}`);
+      }
     }
   }
 
@@ -703,13 +779,9 @@ async function main() {
 
   let totalErrors = 0;
   for (const [zoneName, group] of Object.entries(zoneGroups)) {
-    // 配置 SaaS（Fallback Origin + Custom Hostnames + DNS 记录）
+    // 配置 SaaS（Fallback Origin + Custom Hostnames + DNS CNAME + Pages 自定义域名）
     const result = await configureSaaS(zoneName, group.tokenKey, group.items);
     totalErrors += result.errors;
-
-    // 添加 Pages 自定义域名（激活后 Pages 源站认识 Host header）
-    const pagesResult = await ensurePagesDomains(zoneName, group.tokenKey, group.items);
-    totalErrors += pagesResult.errors;
   }
 
   // 汇总
