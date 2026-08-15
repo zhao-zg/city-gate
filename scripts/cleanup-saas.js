@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * CF for SaaS 资源清理脚本
+ * CF for SaaS 资源清理脚本（o-{prefix} 回源模式）
  *
  * 清理所有由 setup-saas.js 创建的资源：
- *   1. Pages 自定义域名（从 Pages 项目中移除）
+ *   1. Pages 自定义域名（o-{prefix} 绑定到 Pages 项目的域名）
  *   2. Custom Hostnames
  *   3. Fallback Origin
  *   4. Fallback Origin DNS 记录
- *   5. FQDN 的 DNS 记录（A 记录、CNAME 记录）
+ *   5. o-{prefix} 的 DNS 记录（CNAME → pages.dev）
+ *   6. {prefix} 的 DNS 记录（CNAME → o-{prefix}）
  *
  * 环境变量：
  *   CLOUDFLARE_API_TOKEN   — 账户1 Token
@@ -20,7 +21,7 @@ const sc = require('./sync-cname');
 const saas = require('./setup-saas');
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
-const FALLBACK_PREFIX = 'proxy-fallback';
+const FALLBACK_PREFIX = 'o-fallback';
 const dryRun = process.env.DRY_RUN === '1';
 
 function sleep(ms) {
@@ -131,10 +132,10 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   }
 
   let errors = 0;
-
-  // ── Step 1: 清理 Pages 自定义域名 ──
-  console.log(`\n  ── Step 1: Pages 自定义域名 ──`);
   const pagesFqdnList = fqdns.filter(f => saas.extractPagesDomain(f.origin));
+
+  // ── Step 1: 清理 Pages 自定义域名（o-{prefix} 绑定到 Pages 的域名） ──
+  console.log(`\n  ── Step 1: Pages 自定义域名（o-{prefix}） ──`);
 
   const pagesProjectSet = new Set();
   for (const f of pagesFqdnList) {
@@ -154,8 +155,11 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     try {
       const domains = await listPagesDomains(accountId, projectName, pagesTokenKey);
       for (const d of domains) {
-        const isOurs = pagesFqdnList.some(f => f.fqdn === d.name);
-        if (isOurs || d.name.includes(zoneName.replace('.', '-'))) {
+        // 清理 o-{prefix} 开头的域名（新架构）
+        const isOriginDomain = d.name.startsWith(saas.ORIGIN_PREFIX);
+        // 也清理旧的直接绑定（兼容旧架构残留）
+        const isOldDirectBind = pagesFqdnList.some(f => f.fqdn === d.name);
+        if (isOriginDomain || isOldDirectBind) {
           console.log(`    删除 Pages 域名: ${d.name} (project: ${projectName}, status: ${d.status})`);
           if (!dryRun) {
             try {
@@ -195,7 +199,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     errors++;
   }
 
-  // ── Step 3: 清理 Fallback Origin（必须先删，否则 DNS 记录被引用无法删除） ──
+  // ── Step 3: 清理 Fallback Origin ──
   console.log(`\n  ── Step 3: Fallback Origin ──`);
   try {
     const fallback = await getFallbackOrigin(zoneId, tokenKey);
@@ -208,7 +212,6 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
       console.log(`    无 Fallback Origin`);
     }
   } catch (e) {
-    // Fallback Origin 可能已被删除（Resource not found），不算错误
     if (e.message.includes('not found') || e.message.includes('Resource not found')) {
       console.log(`    Fallback Origin 已不存在 → 忽略`);
     } else {
@@ -217,30 +220,26 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
     }
   }
 
-  // ── Step 4: 清理 Fallback DNS 记录（带重试，CF API 可能延迟释放引用） ──
-  console.log(`\n  ── Step 4: Fallback DNS 记录 ──`);
+  // ── Step 4: 清理 Fallback Origin DNS 记录（带重试） ──
+  console.log(`\n  ── Step 4: Fallback Origin DNS 记录 ──`);
   const fallbackFqdn = `${FALLBACK_PREFIX}.${zoneName}`;
   try {
-    let fallbackRecordsDeleted = false;
     for (const type of ['A', 'CNAME']) {
       const records = await getDnsRecord(zoneId, fallbackFqdn, type, tokenKey);
       for (const rec of records) {
-        console.log(`    删除 ${rec.type} 记录: ${fallbackFqdn} → ${rec.content} (proxied=${rec.proxied})`);
+        console.log(`    删除 ${rec.type}: ${fallbackFqdn} → ${rec.content} (proxied=${rec.proxied})`);
         if (!dryRun) {
-          // 最多重试 3 次，间隔 5 秒
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               await deleteDnsRecord(zoneId, rec.id, tokenKey);
-              fallbackRecordsDeleted = true;
               break;
             } catch (e) {
               if (e.message.includes('not allowed') || e.message.includes('fallback origin')) {
                 if (attempt < 3) {
-                  console.log(`    ⚠ 第 ${attempt} 次删除失败（Fallback Origin 引用未释放），5s 后重试...`);
+                  console.log(`    ⚠ 第 ${attempt} 次删除失败（引用未释放），5s 后重试...`);
                   await sleep(5000);
                 } else {
-                  console.log(`    ⚠ 3 次重试仍失败，跳过此记录`);
-                  // 不算错误，setup-saas.js 会覆盖此记录
+                  console.log(`    ⚠ 3 次重试仍失败，跳过`);
                 }
               } else {
                 throw e;
@@ -250,16 +249,35 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
         }
       }
     }
-    if (!fallbackRecordsDeleted) {
-      console.log(`    无需清理的 Fallback DNS 记录`);
-    }
   } catch (e) {
     console.error(`    ✗ 清理 Fallback DNS 失败: ${e.message}`);
     errors++;
   }
 
-  // ── Step 5: 清理 FQDN 的 DNS 记录 ──
-  console.log(`\n  ── FQDN DNS 记录 ──`);
+  // ── Step 5: 清理 o-{prefix} DNS 记录（CNAME → pages.dev） ──
+  console.log(`\n  ── Step 5: o-{prefix} DNS 记录 ──`);
+  for (const f of pagesFqdnList) {
+    const originFqdn = f.originFqdn;
+    try {
+      const allRecords = await sc.getDnsRecords(zoneId, originFqdn, tokenKey);
+      if (allRecords.length === 0) {
+        console.log(`    ${originFqdn}: 无 DNS 记录`);
+      } else {
+        for (const rec of allRecords) {
+          console.log(`    删除 ${rec.type}: ${originFqdn} → ${rec.content} (proxied=${rec.proxied})`);
+          if (!dryRun) {
+            await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`    ✗ ${originFqdn} 清理失败: ${e.message}`);
+      errors++;
+    }
+  }
+
+  // ── Step 6: 清理 {prefix} DNS 记录 ──
+  console.log(`\n  ── Step 6: {prefix} DNS 记录 ──`);
   for (const f of fqdns) {
     try {
       const allRecords = await sc.getDnsRecords(zoneId, f.fqdn, tokenKey);
@@ -284,7 +302,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
 
 async function main() {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║  CF for SaaS 资源清理脚本                       ║');
+  console.log('║  CF for SaaS 资源清理脚本（o-{prefix} 模式）    ║');
   console.log('╚════════════════════════════════════════════════╝');
 
   if (dryRun) {
