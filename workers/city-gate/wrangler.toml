@@ -33,13 +33,11 @@ DOMAIN_CONFIG_JSON = """
   "groups": [
     {
       "prefix": "sg",
-      "origin": "https://sg-f3b.pages.dev",
       "pages_project": "sg",
       "cities": ["ALL"]
     },
     {
       "prefix": "books",
-      "origin": "https://books-em3.pages.dev",
       "pages_project": "books",
       "cities": ["ALL"],
       "schedule": {
@@ -49,31 +47,26 @@ DOMAIN_CONFIG_JSON = """
     },
     {
       "prefix": "bible",
-      "origin": "https://bible-bka.pages.dev",
       "pages_project": "bible",
       "cities": ["ALL"]
     },
     {
       "prefix": "cx",
-      "origin": "https://cx-7ai.pages.dev",
       "pages_project": "cx",
       "cities": ["ALL"]
     },
     {
       "prefix": "sg-resource",
-      "origin": "https://sg-resource-3ld.pages.dev",
       "pages_project": "sg-resource",
       "cities": ["ALL"]
     },
     {
       "prefix": "apk",
-      "origin": "https://cxapk-ah0.pages.dev",
       "pages_project": "cxapk",
       "cities": ["ALL"]
     },
     {
       "prefix": "answer",
-      "origin": "https://answer.07170501.xyz",
       "cities": ["ALL"]
     }
   ]
