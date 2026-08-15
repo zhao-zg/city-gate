@@ -29,6 +29,7 @@ services:
       - SPEED_TEST_SEC=${SPEED_TEST_SEC:-2}
       - MAX_LATENCY_MS=${MAX_LATENCY_MS:-300}
       - SPEED_TEST_MODE=${SPEED_TEST_MODE:-fast}
+      - MAX_SPEED_TEST_COUNT=${MAX_SPEED_TEST_COUNT:-20}
       # ── Zone 配置覆盖（可选，JSON 字符串，留空则使用镜像内 wrangler.toml） ──
       - ZONE_CONFIG_JSON=${ZONE_CONFIG_JSON:-}
     volumes:

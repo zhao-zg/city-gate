@@ -24,6 +24,7 @@
  *   SPEED_TEST_SEC（可选） — 测速时长秒数（默认 2）
  *   MAX_LATENCY_MS（可选） — 延迟上限 ms，超过不测速（默认 300，0=不限制）
  *   SPEED_TEST_MODE（可选）— fast=达标即停 / best=全部测完选最优（默认 fast）
+ *   MAX_SPEED_TEST_COUNT（可选）— best 模式下最大测速 IP 数（默认 20）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -45,14 +46,16 @@ const SPEED_TEST_SEC = parseInt(process.env.SPEED_TEST_SEC || '2', 10);
 const MAX_LATENCY_MS = parseInt(process.env.MAX_LATENCY_MS || '300', 10);
 // 测速模式：fast = 达标即停 / best = 全部测完选最优
 const SPEED_TEST_MODE = process.env.SPEED_TEST_MODE || 'fast';
+// best 模式下最大测速 IP 数（避免串行测速耗时过长）
+const MAX_SPEED_TEST_COUNT = parseInt(process.env.MAX_SPEED_TEST_COUNT || '20', 10);
 
 // ── IP 质量检测 ──────────────────────────────────────
 
 /**
  * 测量 TCP 握手延迟（ms）
- * 只测 TCP 连接速度，不发送 HTTP 请求，快速且不影响 CF 计数
+ * 默认测 80 端口（与测速端口一致），确保延迟达标的 IP 也能正常测速
  */
-function measureLatency(ip, port = 443) {
+function measureLatency(ip, port = 80) {
   return new Promise((resolve) => {
     const start = Date.now();
     const socket = new net.Socket();
@@ -99,7 +102,8 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
   const byPrefix = new Map();
 
   for (const { ip, latency } of ipLatencyList) {
-    const prefix = ipPrefix(ip, prefixLen);
+    // /32 时直接用完整 IP 做 key，跳过 ipPrefix 调用
+    const prefix = prefixLen === 32 ? ip : ipPrefix(ip, prefixLen);
     const existing = byPrefix.get(prefix);
 
     if (!existing || latency < existing.latency) {
@@ -135,6 +139,8 @@ function testDownloadSpeed(ip, testSec) {
   const CONCURRENCY = 2;
   // 测速端口（80 = HTTP，避免 443 被 CF WAF 拦截）
   const SPEED_PORT = 80;
+  // 连续失败 5 次直接终止测速
+  const MAX_CONSECUTIVE_FAILURES = 5;
 
   return new Promise((resolve) => {
     const start = Date.now();
@@ -142,8 +148,11 @@ function testDownloadSpeed(ip, testSec) {
     const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量
     let settled = false;
     let totalDownloaded = 0;
+    let downloadedAtCutoff = 0; // 测速到点时的下载量（用于精确计算速度）
     let requestCount = 0;
     let activeRequests = 0;
+    let consecutiveFailures = 0;
+    const pendingTimers = new Set();
 
     // keep-alive agent 复用 TCP 连接
     const agent = new http.Agent({
@@ -152,8 +161,9 @@ function testDownloadSpeed(ip, testSec) {
     });
 
     const cleanup = () => {
-      clearTimeout(testTimer);
-      clearTimeout(hardTimer);
+      // 清除所有 pending timers，避免 setTimeout 堆积
+      for (const t of pendingTimers) clearTimeout(t);
+      pendingTimers.clear();
       agent.destroy();
     };
 
@@ -161,17 +171,32 @@ function testDownloadSpeed(ip, testSec) {
       if (settled) return;
       settled = true;
       cleanup();
-      const elapsedSec = Math.max((Date.now() - start) / 1000, 0.001);
-      const speed_kbps = Math.round((totalDownloaded / 1024) / elapsedSec);
+      // 用测速时长（非含缓冲期的实际经过时间）计算速度，避免低估
+      const effectiveSec = Math.max(durationMs / 1000, 0.001);
+      const effectiveDownloaded = downloadedAtCutoff || totalDownloaded;
+      const speed_kbps = Math.round((effectiveDownloaded / 1024) / effectiveSec);
       resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start, requests: requestCount });
     };
 
-    // 测速时长到点后延迟一点等待在途数据统计
+    function scheduleNext(delay) {
+      if (settled) return;
+      const timer = setTimeout(() => {
+        pendingTimers.delete(timer);
+        makeRequest();
+      }, delay);
+      pendingTimers.add(timer);
+    }
+
+    // 测速时长到点：记录截止下载量，给在途请求 500ms 缓冲收尾
     const testTimer = setTimeout(() => {
-      // 给在途请求 500ms 缓冲收尾
-      setTimeout(finish, 500);
+      downloadedAtCutoff = totalDownloaded;
+      const bufferTimer = setTimeout(finish, 500);
+      pendingTimers.add(bufferTimer);
     }, durationMs);
+    pendingTimers.add(testTimer);
+
     const hardTimer = setTimeout(finish, timeoutMs);
+    pendingTimers.add(hardTimer);
 
     function makeRequest() {
       if (settled) return;
@@ -192,13 +217,32 @@ function testDownloadSpeed(ip, testSec) {
         timeout: timeoutMs,
         agent,
       }, (res) => {
-        // 非 200 响应不算有效下载
+        // 非 200 响应：等流结束再递减 activeRequests，避免竞态
         if (res.statusCode !== 200) {
-          activeRequests--;
-          if (!settled) setTimeout(makeRequest, 100);
+          let decremented = false;
+          res.on('end', () => {
+            if (decremented) return;
+            decremented = true;
+            activeRequests--;
+            consecutiveFailures++;
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+              finish();
+              return;
+            }
+            if (!settled) scheduleNext(100);
+          });
+          res.on('error', () => {
+            if (decremented) return;
+            decremented = true;
+            activeRequests--;
+            if (!settled) scheduleNext(100);
+          });
           res.resume();
           return;
         }
+
+        // 200 响应：重置连续失败计数
+        consecutiveFailures = 0;
 
         res.on('data', (chunk) => {
           if (!settled) totalDownloaded += chunk.length;
@@ -216,7 +260,12 @@ function testDownloadSpeed(ip, testSec) {
       req.on('timeout', () => { req.destroy(); });
       req.on('error', () => {
         activeRequests--;
-        if (!settled) setTimeout(makeRequest, 100);
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          finish();
+          return;
+        }
+        if (!settled) scheduleNext(100);
       });
       req.end();
     }
@@ -246,6 +295,7 @@ function checkConnectivity(fqdn) {
       method: 'GET',
       timeout: CHECK_TIMEOUT,
       rejectUnauthorized: false,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' },
     }, (res) => {
       let body = '';
       res.on('data', (chunk) => {
@@ -309,24 +359,33 @@ async function buildIpPool(testHost, needCount) {
     throw new Error('未能从优选域名池收集到任何 IP！');
   }
 
-  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟
+  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 10 个并发，避免触发 CF 限速）
   console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个）...`);
 
   async function checkIpBatch(ipSet) {
     const ipList = [...ipSet];
-    return await Promise.all(
-      ipList.map(async (ip) => {
-        const check = await sc.testIp1034(ip, testHost);
-        if (!check.ok) {
-          return { ip, ok: false, reason: check.reason, latency: null };
-        }
-        const latency = await measureLatency(ip);
-        if (latency === null) {
-          return { ip, ok: false, reason: 'TCP 连接失败', latency: null };
-        }
-        return { ip, ok: true, reason: check.reason, latency };
-      })
-    );
+    const BATCH_SIZE = 10;
+    const allResults = [];
+
+    for (let i = 0; i < ipList.length; i += BATCH_SIZE) {
+      const batch = ipList.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (ip) => {
+          const check = await sc.testIp1034(ip, testHost);
+          if (!check.ok) {
+            return { ip, ok: false, reason: check.reason, latency: null };
+          }
+          const latency = await measureLatency(ip);
+          if (latency === null) {
+            return { ip, ok: false, reason: 'TCP 连接失败', latency: null };
+          }
+          return { ip, ok: true, reason: check.reason, latency };
+        })
+      );
+      allResults.push(...batchResults);
+    }
+
+    return allResults;
   }
 
   let results = await checkIpBatch(rawIps);
@@ -407,7 +466,10 @@ async function buildIpPool(testHost, needCount) {
     throw new Error('没有可用的 IP！');
   }
 
-  return deduped;
+  // 收集所有已检测过的 IP（包括不可用的），供后续测速阶段去重
+  const allSeenIps = new Set(results.map(r => r.ip));
+
+  return { pool: deduped, seenIps: allSeenIps };
 }
 
 // ── Zone 分配 ───────────────────────────────────────
@@ -420,13 +482,17 @@ async function buildIpPool(testHost, needCount) {
 function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   const poolZones = zoneMap.filter(z => !z.noPreferred);
   const assignments = [];
+  const poolLen = ipPool.length;
 
   for (let zi = 0; zi < poolZones.length; zi++) {
     const zone = poolZones[zi];
     const ips = [];
 
+    // 使用偏移分配：每个 zone 从池中不同位置开始取 IP，最大化跨 zone 差异性
+    // 当池够大时各 zone 完全不重叠；池不足时各 zone 至少不会完全相同
+    const offset = Math.floor(zi * poolLen / poolZones.length);
     for (let j = 0; j < ipPerZone; j++) {
-      const idx = (zi * ipPerZone + j) % ipPool.length;
+      const idx = (offset + j) % poolLen;
       ips.push(ipPool[idx].ip);
     }
 
@@ -674,7 +740,7 @@ async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   const needCount = poolZones.length * IP_PER_ZONE;
-  const ipPool = await buildIpPool(testHost, needCount);
+  const { pool: ipPool, seenIps: allSeenIps } = await buildIpPool(testHost, needCount);
 
   if (ipPool.length < needCount) {
     console.log(`\n  ⚠  IP 池 ${ipPool.length} 个，需求 ${needCount} 个（将跨 zone 复用）`);
@@ -694,13 +760,21 @@ async function main() {
   console.log(`  模式: ${isBestMode ? 'best（全部测完选最优）' : 'fast（达标即停）'}`);
   console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
   console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
-  console.log(`  需求数量: ${needCount} 个达标 IP\n`);
+  console.log(`  需求数量: ${needCount} 个达标 IP`);
+  if (isBestMode) {
+    console.log(`  最大测速数: ${MAX_SPEED_TEST_COUNT} 个（避免耗时过长）`);
+  }
+  console.log('');
 
   const speedResults = []; // { ip, latency, speed_kbps }
   const testedIps = new Set();
 
-  // fast 模式达标即停，best 模式测完全部
-  for (const { ip, latency } of ipPool) {
+  // best 模式限制最大测速 IP 数，避免串行测速耗时过长
+  const maxTestCount = isBestMode ? Math.min(ipPool.length, MAX_SPEED_TEST_COUNT) : ipPool.length;
+
+  // fast 模式达标即停，best 模式测完上限数
+  for (let i = 0; i < maxTestCount; i++) {
+    const { ip, latency } = ipPool[i];
     if (!isBestMode && speedResults.length >= needCount) break;
 
     console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
@@ -730,7 +804,8 @@ async function main() {
         const ips = await sc.resolveIps(domain);
         for (const ip of ips) {
           if (!isBestMode && speedResults.length >= needCount) break;
-          if (testedIps.has(ip) || sc.is1034Ip(ip)) continue;
+          // 用 allSeenIps 去重（包含 buildIpPool 阶段已检测的所有 IP）
+          if (testedIps.has(ip) || allSeenIps.has(ip) || sc.is1034Ip(ip)) continue;
 
           // 先快速验证 1034
           const check = await sc.testIp1034(ip, testHost);
