@@ -234,6 +234,11 @@ async function ensureOriginRules(zoneId, zoneName, pagesFqdnMap, tokenKey) {
   try {
     existingRuleset = await listOriginRules(zoneId, tokenKey);
   } catch (e) {
+    if (e.message.includes('not authorized') || e.message.includes('403')) {
+      console.error(`    ✗ Origin Rules API 权限不足: ${e.message}`);
+      console.error(`    ℹ 请在 Cloudflare Dashboard 更新 API Token 权限，添加 "Account Rulesets: Edit"`);
+      return { created: 0, errors: 1, authError: true };
+    }
     console.error(`    ✗ 获取现有 Origin Rules 失败: ${e.message}`);
     return { created: 0, errors: 1 };
   }
@@ -551,7 +556,7 @@ async function cleanupPagesDirectBind(zoneName, tokenKey, fqdns) {
     return { errors: 0 };
   }
 
-  // 遍历 FQDN，尝试从 Pages 项目中移除自定义域名
+    // 遍历 FQDN，尝试从 Pages 项目中移除自定义域名
   // 需要找到 Pages 项目信息
   for (const f of pagesFqdnList) {
     const pagesDomain = extractPagesDomain(f.origin);
@@ -581,8 +586,13 @@ async function cleanupPagesDirectBind(zoneName, tokenKey, fqdns) {
         }
       }
     } catch (e) {
-      console.error(`    ✗ 清理 ${f.fqdn} 失败: ${e.message}`);
-      errors++;
+      // 域名不存在是正常的（之前可能已被删除），静默忽略
+      if (e.message.includes('does not exist') || e.message.includes('not found')) {
+        // 静默忽略
+      } else {
+        console.error(`    ✗ 清理 ${f.fqdn} 失败: ${e.message}`);
+        errors++;
+      }
     }
   }
 
