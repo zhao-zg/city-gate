@@ -50,7 +50,9 @@ async function cfApi(pathSuffix, tokenKey) {
 
 /**
  * 获取账户下的所有 Pages 项目
- * 返回 Map<pages_project_name, subdomain.pages.dev>
+ * 返回 Map<pages_project_name, pages.dev域名>
+ *
+ * CF API 返回的 subdomain 字段已包含 .pages.dev 后缀（如 "sg-7gj.pages.dev"）
  */
 async function fetchPagesDomains(tokenKey) {
   const accountId = await getAccountId(tokenKey);
@@ -58,7 +60,12 @@ async function fetchPagesDomains(tokenKey) {
   const map = new Map();
   for (const project of json.result || []) {
     if (project.name && project.subdomain) {
-      map.set(project.name, `${project.subdomain}.pages.dev`);
+      // subdomain 格式: "sg-7gj.pages.dev" — 已含 .pages.dev 后缀
+      // 做兼容：如果不含 .pages.dev 则拼接
+      const domain = project.subdomain.includes('.pages.dev')
+        ? project.subdomain
+        : `${project.subdomain}.pages.dev`;
+      map.set(project.name, domain);
     }
   }
   return map;
