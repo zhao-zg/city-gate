@@ -35,6 +35,8 @@ ENV IP_DEDUP_PREFIX="32"
 # 测速配置
 ENV MIN_SPEED_KBPS="500"
 ENV SPEED_TEST_SEC="2"
+ENV MAX_LATENCY_MS="300"
+ENV SPEED_TEST_MODE="fast"
 # Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
 ENV ZONE_CONFIG_JSON=""
 

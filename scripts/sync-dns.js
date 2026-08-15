@@ -22,6 +22,8 @@
  *   IP_DEDUP_PREFIX（可选）— IP 去重前缀长度（默认 32 = 仅去重完全相同的 IP）
  *   MIN_SPEED_KBPS（可选） — 最低速度 KB/s（默认 500）
  *   SPEED_TEST_SEC（可选） — 测速时长秒数（默认 2）
+ *   MAX_LATENCY_MS（可选） — 延迟上限 ms，超过不测速（默认 300，0=不限制）
+ *   SPEED_TEST_MODE（可选）— fast=达标即停 / best=全部测完选最优（默认 fast）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -39,6 +41,10 @@ const IP_PER_ZONE = parseInt(process.env.IP_PER_ZONE || '2', 10);
 const IP_DEDUP_PREFIX = parseInt(process.env.IP_DEDUP_PREFIX || '32', 10);
 const MIN_SPEED_KBPS = parseInt(process.env.MIN_SPEED_KBPS || '500', 10);
 const SPEED_TEST_SEC = parseInt(process.env.SPEED_TEST_SEC || '2', 10);
+// 延迟上限（ms），超过的 IP 不参与测速（0 = 不限制）
+const MAX_LATENCY_MS = parseInt(process.env.MAX_LATENCY_MS || '300', 10);
+// 测速模式：fast = 达标即停 / best = 全部测完选最优
+const SPEED_TEST_MODE = process.env.SPEED_TEST_MODE || 'fast';
 
 // ── IP 质量检测 ──────────────────────────────────────
 
@@ -280,7 +286,9 @@ async function buildIpPool(testHost, needCount) {
   console.log('\n── IP 池构建 ──');
   console.log(`  测试 Host: ${testHost}`);
   const dedupDesc = IP_DEDUP_PREFIX > 0 ? `/${IP_DEDUP_PREFIX} 去重` : '不去重';
+  const latencyDesc = MAX_LATENCY_MS > 0 ? `≤ ${MAX_LATENCY_MS}ms` : '不限制';
   console.log(`  去重: ${dedupDesc}`);
+  console.log(`  延迟上限: ${latencyDesc}`);
   console.log(`  每 zone: ${IP_PER_ZONE} 个 IP，共需 ${needCount} 个\n`);
 
   // 第1步：从 CNAME_POOL 收集 IP
@@ -324,14 +332,22 @@ async function buildIpPool(testHost, needCount) {
   let results = await checkIpBatch(rawIps);
   let good = results.filter(r => r.ok);
   let bad = results.filter(r => !r.ok);
+  // 延迟上限过滤
+  let filteredByLatency = 0;
+  if (MAX_LATENCY_MS > 0) {
+    const before = good.length;
+    good = good.filter(r => r.latency <= MAX_LATENCY_MS);
+    filteredByLatency = before - good.length;
+  }
 
   for (const r of results) {
     const status = r.ok ? '✓' : '✗';
     const latencyStr = r.ok ? `${r.latency}ms` : '';
-    console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? '' : '— ' + r.reason}`);
+    const filtered = r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS ? ' [超延迟] ' : '';
+    console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? filtered : '— ' + r.reason}`);
   }
 
-  console.log(`\n  检测结果: 可用 ${good.length} / 不可用 ${bad.length}`);
+  console.log(`\n  检测结果: 可用 ${good.length} / 不可用 ${bad.length}${filteredByLatency > 0 ? ` / 超延迟 ${filteredByLatency}` : ''}`);
 
   // 第3步：按延迟排序（prefixLen=0 时不去重，保留全部）
   console.log(`\n  [3] ${dedupDesc}...`);
@@ -367,9 +383,14 @@ async function buildIpPool(testHost, needCount) {
         for (const r of newResults) {
           const status = r.ok ? '✓' : '✗';
           const latencyStr = r.ok ? `${r.latency}ms` : '';
-          console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? '' : '— ' + r.reason}`);
+          const filtered = r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS ? ' [超延迟] ' : '';
+          console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? filtered : '— ' + r.reason}`);
         }
-        const newGood = newResults.filter(r => r.ok);
+        let newGood = newResults.filter(r => r.ok);
+        // 补充 IP 也过滤延迟
+        if (MAX_LATENCY_MS > 0) {
+          newGood = newGood.filter(r => r.latency <= MAX_LATENCY_MS);
+        }
         results = [...results, ...newResults];
         good = [...good, ...newGood];
         deduped = dedupIps(good);
@@ -660,12 +681,17 @@ async function main() {
   }
 
   // ═══════════════════════════════════════════════════
-  // 第二步：测速筛选（串行测速，从低延迟开始，达标即保留）
+  // 第二步：测速筛选
+  // fast = 从低延迟开始逐个测速，凑够 needCount 个达标即停
+  // best = 全部测完后按速度排序，选最快的 needCount 个
   // ═══════════════════════════════════════════════════
+
+  const isBestMode = SPEED_TEST_MODE === 'best';
 
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  第二步：测速筛选');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`  模式: ${isBestMode ? 'best（全部测完选最优）' : 'fast（达标即停）'}`);
   console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
   console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
   console.log(`  需求数量: ${needCount} 个达标 IP\n`);
@@ -673,8 +699,9 @@ async function main() {
   const speedResults = []; // { ip, latency, speed_kbps }
   const testedIps = new Set();
 
+  // fast 模式达标即停，best 模式测完全部
   for (const { ip, latency } of ipPool) {
-    if (speedResults.length >= needCount) break;
+    if (!isBestMode && speedResults.length >= needCount) break;
 
     console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
     const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
@@ -699,10 +726,10 @@ async function main() {
     try {
       const top20 = await sc.fetchCfTop20();
       for (const domain of top20) {
-        if (speedResults.length >= needCount) break;
+        if (!isBestMode && speedResults.length >= needCount) break;
         const ips = await sc.resolveIps(domain);
         for (const ip of ips) {
-          if (speedResults.length >= needCount) break;
+          if (!isBestMode && speedResults.length >= needCount) break;
           if (testedIps.has(ip) || sc.is1034Ip(ip)) continue;
 
           // 先快速验证 1034
@@ -711,6 +738,12 @@ async function main() {
 
           const latency = await measureLatency(ip);
           if (latency === null) { testedIps.add(ip); continue; }
+          // 延迟过滤
+          if (MAX_LATENCY_MS > 0 && latency > MAX_LATENCY_MS) {
+            console.log(`  ⊘ ${ip}（延迟 ${latency}ms > ${MAX_LATENCY_MS}ms，跳过）`);
+            testedIps.add(ip);
+            continue;
+          }
 
           console.log(`  ▸ ${ip}（候选，延迟 ${latency}ms）测速...`);
           const result = await testDownloadSpeed(ip, SPEED_TEST_SEC);
@@ -735,6 +768,15 @@ async function main() {
 
   if (speedResults.length === 0) {
     throw new Error('没有测速达标的 IP！');
+  }
+
+  // best 模式：全部测完后按速度排序，选最快的 needCount 个
+  if (isBestMode && speedResults.length > needCount) {
+    speedResults.sort((a, b) => b.speed_kbps - a.speed_kbps);
+    console.log(`\n  best 模式: ${speedResults.length} 个达标，选最快的 ${needCount} 个`);
+    speedResults.length = needCount;
+    // 重新按延迟排序（分配时优先低延迟）
+    speedResults.sort((a, b) => a.latency - b.latency);
   }
 
   if (speedResults.length < needCount) {
