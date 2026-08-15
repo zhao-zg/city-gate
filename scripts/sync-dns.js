@@ -5,14 +5,14 @@
  * 架构：
  *   Pages 源站 → A 记录指向优选 CF 边缘 IP (proxied=false, DNS only)
  *     用户直连优选 IP，CF Edge 通过 SaaS Custom Hostname 路由
- *     Origin Rule 改写 Host header 为 pages.dev
+ *     Pages 自定义域名已激活，源站认识 Host header → 200 OK
  *
  *   非 Pages 源站 → CNAME → 源站域名 (proxied=false)
  *     直连外部源站，不经过 CF 代理
  *
  * 与 setup-saas.js 的关系：
- *   setup-saas.js: SaaS 配置（Fallback Origin + Custom Hostnames + Origin Rules）
- *   sync-dns.js:   用户域名 DNS 记录同步（A 记录优选 IP 或 CNAME 直连）
+ *   setup-saas.js: SaaS 配置（Fallback Origin + Custom Hostnames + Pages 自定义域名 + DNS proxied=true）
+ *   sync-dns.js:   将 DNS 从 proxied=true 改为 A 记录优选 IP (proxied=false)
  *
  * 优选 IP 来源：
  *   从 sync-cname.js 的 CNAME_POOL 优选域名池解析得到，
