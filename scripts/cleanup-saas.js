@@ -140,7 +140,7 @@ async function cleanZone(zoneName, tokenKey, fqdns) {
   const pagesProjectSet = new Set();
   for (const f of pagesFqdnList) {
     try {
-      const pagesInfo = await saas.findPagesProject(f.origin, f.tokenKey, f.pagesProject);
+      const pagesInfo = await saas.findPagesProject(f.tokenKey, f.pagesProject);
       if (pagesInfo) {
         const key = `${pagesInfo.accountId}|${pagesInfo.projectName}|${pagesInfo.tokenKey}`;
         pagesProjectSet.add(key);

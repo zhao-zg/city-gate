@@ -26,13 +26,11 @@ DOMAIN_CONFIG_JSON = """
   "groups": [
     {
       "prefix": "sg",
-      "origin": "https://sg-7gj.pages.dev",
       "pages_project": "sg",
       "cities": ["ALL"]
     },
     {
       "prefix": "books",
-      "origin": "https://books-89r.pages.dev",
       "pages_project": "books",
       "cities": ["ALL"],
       "schedule": {
@@ -42,26 +40,22 @@ DOMAIN_CONFIG_JSON = """
     },
     {
       "prefix": "bible",
-      "origin": "https://bible-2o8.pages.dev",
       "pages_project": "bible",
       "cities": ["杭州", "Hangzhou"],
       "provinces": ["浙江", "Zhejiang"]
     },
     {
       "prefix": "cx",
-      "origin": "https://cx-1wd.pages.dev",
       "pages_project": "cx",
       "cities": ["ALL"]
     },
     {
       "prefix": "sg-resource",
-      "origin": "https://sg-resource.pages.dev",
       "pages_project": "sg-resource",
       "cities": ["ALL"]
     },
     {
       "prefix": "apk",
-      "origin": "https://cxapk-ah0.pages.dev",
       "pages_project": "cxapk",
       "cities": ["ALL"]
     }

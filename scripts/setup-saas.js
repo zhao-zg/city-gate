@@ -413,12 +413,33 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
   let errors = 0;
   const pagesFqdnList = fqdns.filter(f => f.isPages);
 
+  // ── 预查询: 通过 API 获取每个 pagesProject 的实际 pages.dev 域名 ──
+  // 项目名可能被占用导致域名带后缀（如 cx → cx-1wd.pages.dev），必须从 API 获取
+  const pagesDomainMap = new Map();  // pagesProject → pagesDomain
+  for (const f of pagesFqdnList) {
+    if (pagesDomainMap.has(f.pagesProject)) continue;
+    const pagesInfo = await findPagesProject(f.tokenKey, f.pagesProject);
+    if (pagesInfo) {
+      pagesDomainMap.set(f.pagesProject, pagesInfo.pagesDomain);
+    } else {
+      console.error(`  ✗ 找不到 Pages 项目: ${f.pagesProject} (tokenKey: ${f.tokenKey})`);
+      errors++;
+    }
+  }
+  // 为每个 FQDN 附加 pagesDomain
+  for (const f of pagesFqdnList) {
+    f.pagesDomain = pagesDomainMap.get(f.pagesProject) || null;
+  }
+
   // ── Step 1: o-{prefix} DNS 记录（CNAME → pages.dev, proxied=true） ──
   // 这些是回源域名，Pages 项目会绑定它们
   console.log(`\n  ── Step 1: 回源域名 DNS（o-{prefix} CNAME → pages.dev, proxied=true） ──`);
   for (const f of pagesFqdnList) {
     const pagesDomain = f.pagesDomain;
-    const originFqdn = f.originFqdn;
+    if (!pagesDomain) {
+      console.log(`    ${f.originFqdn}: 跳过（pagesProject "${f.pagesProject}" 未找到）`);
+      continue;
+    }
     console.log(`    检查 DNS: ${originFqdn} → CNAME ${pagesDomain} (proxied=true)`);
     try {
       // 清理旧 A 记录
@@ -493,16 +514,9 @@ async function configureSaaS(zoneName, tokenKey, fqdns) {
     const pagesDomain = f.pagesDomain;
     if (!pagesDomain) continue;
 
-    let pagesInfo;
-    try {
-      pagesInfo = await findPagesProject(f.origin, f.tokenKey, f.pagesProject);
-    } catch {
-      console.error(`    ✗ 找不到 Pages 项目: ${pagesDomain}`);
-      errors++;
-      continue;
-    }
+    const pagesInfo = await findPagesProject(f.tokenKey, f.pagesProject);
     if (!pagesInfo) {
-      console.error(`    ✗ 找不到 Pages 项目: ${pagesDomain}`);
+      console.error(`    ✗ 找不到 Pages 项目: ${f.pagesProject}`);
       errors++;
       continue;
     }
@@ -760,8 +774,8 @@ async function main() {
   console.log('│  FQDN                              →  回源域名    源站           │');
   console.log('├──────────────────────────────────────────────────────────────────┤');
   for (const f of fqdnList) {
-    const originTag = f.isPages ? 'Pages' : '外部';
-    console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.originFqdn.padEnd(22)} ${f.origin.padEnd(16)} (${originTag}) │`);
+    const originDisplay = f.isPages ? (f.pagesProject || 'Pages') : (f.origin || '外部');
+    console.log(`│  ${f.fqdn.padEnd(34)} →  ${f.originFqdn.padEnd(22)} ${originDisplay.padEnd(16)} (${f.isPages ? 'Pages' : '外部'}) │`);
   }
   console.log('└──────────────────────────────────────────────────────────────────┘');
 
@@ -803,7 +817,6 @@ module.exports = {
   configureSaaS,
   extractPagesDomain,
   findPagesProject,
-  findPagesProjectByOrigin,
   listCustomHostnames,
   deleteCustomHostname,
   getFallbackOrigin,

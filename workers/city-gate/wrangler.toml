@@ -67,6 +67,7 @@ DOMAIN_CONFIG_JSON = """
     },
     {
       "prefix": "answer",
+      "origin": "https://answer.07170501.xyz",
       "cities": ["ALL"]
     }
   ]
