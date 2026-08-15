@@ -30,6 +30,7 @@
  */
 
 const https = require('https');
+const http = require('http');
 const net = require('net');
 const sc = require('./sync-cname');
 
@@ -109,12 +110,14 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
  * 对指定 IP 做下载速度测试
  *
  * 使用 Cloudflare 官方测速端点 speed.cloudflare.com/__down?bytes=N
- * 通过 IP 直连 + SNI 指定 speed.cloudflare.com，下载指定大小的随机数据。
+ * 通过 IP 直连 + Host 指定 speed.cloudflare.com，下载指定大小的随机数据。
  *
  * 策略：
- *   - 初始下载 10MB，根据测速时长按需续传（保持持续下载满测速时长）
+ *   - 使用 HTTP 80 端口（speed.cloudflare.com 的 __down 端点在 443 上可能被 CF WAF 拦截，
+ *     XIU2/CloudflareSpeedTest 也建议用 80 端口测速）
+ *   - 每次请求 10MB，下载完自动续传，持续满测速时长
  *   - 2 个并发请求提高吞吐量测量准确性
- *   - keep-alive 复用 TLS 连接，避免反复握手开销
+ *   - keep-alive 复用 TCP 连接，避免反复握手开销
  *
  * 返回 { speed_kbps, downloaded, duration_ms, requests } 或 null（失败）
  */
@@ -124,6 +127,8 @@ function testDownloadSpeed(ip, testSec) {
   const CHUNK_BYTES = 10 * 1024 * 1024;
   // 测速并发数
   const CONCURRENCY = 2;
+  // 测速端口（80 = HTTP，避免 443 被 CF WAF 拦截）
+  const SPEED_PORT = 80;
 
   return new Promise((resolve) => {
     const start = Date.now();
@@ -134,11 +139,10 @@ function testDownloadSpeed(ip, testSec) {
     let requestCount = 0;
     let activeRequests = 0;
 
-    // keep-alive agent 复用 TLS 连接
-    const agent = new https.Agent({
+    // keep-alive agent 复用 TCP 连接
+    const agent = new http.Agent({
       keepAlive: true,
       maxSockets: CONCURRENCY,
-      rejectUnauthorized: false,
     });
 
     const cleanup = () => {
@@ -173,15 +177,14 @@ function testDownloadSpeed(ip, testSec) {
       activeRequests++;
       requestCount++;
 
-      const req = https.request({
+      const req = http.request({
         host: ip,
-        servername: SPEED_HOST,
+        port: SPEED_PORT,
         headers: { Host: SPEED_HOST },
         path: `/__down?bytes=${CHUNK_BYTES}`,
         method: 'GET',
         timeout: timeoutMs,
         agent,
-        rejectUnauthorized: false,
       }, (res) => {
         // 非 200 响应不算有效下载
         if (res.statusCode !== 200) {
