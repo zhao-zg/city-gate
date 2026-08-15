@@ -17,11 +17,13 @@
  *   4. 将更新后的 DOMAIN_CONFIG_JSON 写回 wrangler.toml
  *
  * 环境变量：
- *   CLOUDFLARE_API_TOKEN   — 账户1 Token
- *   CLOUDFLARE_API_TOKEN_2 — 账户2 Token（可选）
+ *   CLOUDFLARE_API_TOKEN   — 当前账户 Token
+ *   WORKER_DIR（可选）     — 只处理指定 Worker 目录（如 workers/city-gate），
+ *                            不设则处理 workers/ 下所有含 wrangler.toml 的目录
  *
  * 用法：
  *   node scripts/resolve-pages.js
+ *   WORKER_DIR=workers/city-gate node scripts/resolve-pages.js
  */
 
 const fs = require('fs');
@@ -186,10 +188,20 @@ async function main() {
   console.log('║  Pages 域名解析 — 自动查询真实 *.pages.dev     ║');
   console.log('╚════════════════════════════════════════════════╝');
 
-  const workersDir = path.join(__dirname, '..', 'workers');
-  const dirs = fs.readdirSync(workersDir)
-    .filter(name => fs.existsSync(path.join(workersDir, name, 'wrangler.toml')))
-    .map(name => path.join('workers', name));
+  let dirs;
+  const workerDir = process.env.WORKER_DIR;
+  if (workerDir) {
+    // 只处理指定目录
+    dirs = [workerDir];
+    console.log(`  指定目录: ${workerDir}`);
+  } else {
+    // 处理所有 Worker 目录
+    const workersDir = path.join(__dirname, '..', 'workers');
+    dirs = fs.readdirSync(workersDir)
+      .filter(name => fs.existsSync(path.join(workersDir, name, 'wrangler.toml')))
+      .map(name => path.join('workers', name));
+    console.log(`  扫描全部: ${dirs.length} 个 Worker 目录`);
+  }
 
   for (const dir of dirs) {
     await processWorkerDir(dir);

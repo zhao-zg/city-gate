@@ -34,9 +34,10 @@ jobs:
       - name: 解析 Pages 项目真实域名
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WORKER_DIR: workers/city-gate
         run: node scripts/resolve-pages.js
       - name: 生成 Worker Routes
-        run: node scripts/generate-routes.js
+        run: node scripts/generate-routes.js workers/city-gate
       - name: 安装 wrangler
         run: npm install -g wrangler
       - name: 部署 Worker（账户1）
@@ -74,10 +75,11 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+          WORKER_DIR: workers/city-gate-2
         run: node scripts/resolve-pages.js
       - name: 生成 Worker Routes
         if: steps.check.outputs.skip == 'false'
-        run: node scripts/generate-routes.js
+        run: node scripts/generate-routes.js workers/city-gate-2
       - name: 安装 wrangler
         if: steps.check.outputs.skip == 'false'
         run: npm install -g wrangler
