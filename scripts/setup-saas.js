@@ -266,24 +266,25 @@ function buildFqdnOriginMap() {
     const prefixInfo = prefixInfoByTokenKey[tokenKey] || {};
     for (const prefix of zone.names) {
       const info = prefixInfo[prefix];
-      if (!info || !info.origin) {
-        console.log(`  ⚠ ${prefix}.${zone.zoneName} 无对应 origin，跳过`);
+      if (!info) {
+        console.log(`  ⚠ ${prefix}.${zone.zoneName} 无对应配置，跳过`);
         continue;
       }
+      // Pages 源站必须有 pages_project，非 Pages 源站必须有 origin
       const isPages = !!info.pagesProject;
-      // CNAME 目标从 origin 提取实际的 pages.dev 子域名（如 cx-1wd.pages.dev），
-      // 而非用 pagesProject 构建（项目名可能被占用导致域名带后缀）
-      const pagesDomain = isPages ? extractPagesDomain(info.origin) : null;
+      if (!isPages && !info.origin) {
+        console.log(`  ⚠ ${prefix}.${zone.zoneName} 非 Pages 源站缺少 origin，跳过`);
+        continue;
+      }
       const originFqdn = `${ORIGIN_PREFIX}${prefix}.${zone.zoneName}`;
       fqdnList.push({
         fqdn: `${prefix}.${zone.zoneName}`,
         zoneName: zone.zoneName,
         tokenKey,
-        origin: info.origin,
+        origin: info.origin || null,   // Pages 源站可不配 origin
         prefix,
         pagesProject: info.pagesProject,
         isPages,       // 是否 Pages 源站（基于 pages_project）
-        pagesDomain,   // 从 origin 提取的实际 pages.dev 子域名 — CNAME 目标
         originFqdn,    // o-{prefix}.{zone}
       });
     }
@@ -293,12 +294,10 @@ function buildFqdnOriginMap() {
 }
 
 /**
- * 从 origin 提取 *.pages.dev 域名（用于查找 Pages 项目）
- * 注意：CNAME 目标应使用 pagesDomain（{pagesProject}.pages.dev），
- *       而非 origin 中的 pages.dev 子域名（可能不一致）
+ * 从字符串提取 *.pages.dev 域名（兼容旧格式）
  */
-function extractPagesDomain(origin) {
-  const host = sc.stripProtocol(origin);
+function extractPagesDomain(str) {
+  const host = sc.stripProtocol(str || '');
   if (host.endsWith('.pages.dev')) {
     return host;
   }
@@ -321,6 +320,11 @@ async function getAccountId(tokenKey) {
 
 const pagesProjectCache = {};
 
+/**
+ * 加载账户下所有 Pages 项目，构建 projectName → { pagesDomain, accountId, tokenKey } 映射
+ * pagesDomain 是项目实际的 *.pages.dev 域名（如 cx-1wd.pages.dev），
+ * 而非项目名拼接（项目名可能被占用导致域名带后缀）
+ */
 async function loadPagesProjects(tokenKey) {
   if (pagesProjectCache[tokenKey]) return pagesProjectCache[tokenKey];
 
@@ -335,13 +339,14 @@ async function loadPagesProjects(tokenKey) {
   const accountId = await getAccountId(tokenKey);
   if (!accountId) return null;
 
-  const projectMap = new Map();
+  const projectMap = new Map();  // projectName → pagesDomain
   try {
     const json = await cfApi(`/accounts/${accountId}/pages/projects`, { tokenKey });
     for (const proj of (json.result || [])) {
       for (const domain of (proj.domains || [])) {
         if (domain.endsWith('.pages.dev')) {
-          projectMap.set(domain, proj.name);
+          projectMap.set(proj.name, domain);
+          break;  // 每个 Pages 项目只有一个 *.pages.dev 域名
         }
       }
     }
@@ -349,39 +354,43 @@ async function loadPagesProjects(tokenKey) {
     return null;
   }
 
-  const result = { accountId, projectMap };
+  const result = { accountId, projectMap, tokenKey };
   pagesProjectCache[tokenKey] = result;
   return result;
 }
 
-async function findPagesProject(origin, tokenKey, pagesProject) {
-  if (pagesProject) {
-    try {
-      const accountId = await getAccountId(tokenKey);
-      if (accountId) {
-        return { accountId, tokenKey, projectName: pagesProject };
-      }
-    } catch (e) {
-      console.log(`    ⚠ 显式 pages_project="${pagesProject}" 获取账户 ID 失败: ${e.message}`);
+/**
+ * 通过 pagesProject 名查找 Pages 项目信息，返回实际 pages.dev 域名
+ * 返回 { accountId, projectName, pagesDomain, tokenKey } 或 null
+ */
+async function findPagesProject(tokenKey, pagesProject) {
+  if (!pagesProject) return null;
+
+  // 先用指定 tokenKey 的账户查找
+  const loaded = await loadPagesProjects(tokenKey);
+  if (loaded && loaded.projectMap.has(pagesProject)) {
+    return {
+      accountId: loaded.accountId,
+      projectName: pagesProject,
+      pagesDomain: loaded.projectMap.get(pagesProject),
+      tokenKey: loaded.tokenKey,
+    };
+  }
+
+  // 回退：遍历所有 tokenKey 查找
+  for (const tk of ['default', 'account2']) {
+    if (tk === tokenKey) continue;
+    const other = await loadPagesProjects(tk);
+    if (other && other.projectMap.has(pagesProject)) {
+      return {
+        accountId: other.accountId,
+        projectName: pagesProject,
+        pagesDomain: other.projectMap.get(pagesProject),
+        tokenKey: other.tokenKey,
+      };
     }
   }
-  return findPagesProjectByOrigin(origin);
-}
 
-async function findPagesProjectByOrigin(origin) {
-  const pagesDomain = extractPagesDomain(origin);
-  if (!pagesDomain) return null;
-
-  const tokenKeys = ['default', 'account2'];
-  for (const tk of tokenKeys) {
-    const loaded = await loadPagesProjects(tk);
-    if (!loaded) continue;
-
-    const projectName = loaded.projectMap.get(pagesDomain);
-    if (projectName) {
-      return { accountId: loaded.accountId, tokenKey: tk, projectName };
-    }
-  }
   return null;
 }
 
