@@ -271,7 +271,9 @@ function buildFqdnOriginMap() {
         continue;
       }
       const isPages = !!info.pagesProject;
-      const pagesDomain = info.pagesProject ? `${info.pagesProject}.pages.dev` : null;
+      // CNAME 目标从 origin 提取实际的 pages.dev 子域名（如 cx-1wd.pages.dev），
+      // 而非用 pagesProject 构建（项目名可能被占用导致域名带后缀）
+      const pagesDomain = isPages ? extractPagesDomain(info.origin) : null;
       const originFqdn = `${ORIGIN_PREFIX}${prefix}.${zone.zoneName}`;
       fqdnList.push({
         fqdn: `${prefix}.${zone.zoneName}`,
@@ -281,7 +283,7 @@ function buildFqdnOriginMap() {
         prefix,
         pagesProject: info.pagesProject,
         isPages,       // 是否 Pages 源站（基于 pages_project）
-        pagesDomain,   // {pagesProject}.pages.dev — CNAME 目标
+        pagesDomain,   // 从 origin 提取的实际 pages.dev 子域名 — CNAME 目标
         originFqdn,    // o-{prefix}.{zone}
       });
     }
