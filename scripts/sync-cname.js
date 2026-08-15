@@ -945,7 +945,7 @@ if (require.main === module) {
   main();
 }
 
-// ── 导出（供其他脚本复用，如 check-cname.js） ──
+// ── 导出（供其他脚本复用，如 setup-saas.js、check-dns.js） ──
 module.exports = {
   autoDetectZoneMap,
   buildZoneMapFromConfig,
@@ -961,6 +961,7 @@ module.exports = {
   testIp1034,
   testIp1034Once,
   checkPoolDomain,
+  validatePool,
   registrableDomain,
   fetchCfTop20: fetchCfIpTop20,
   autoRefillPool,
