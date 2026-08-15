@@ -573,9 +573,9 @@ async function processZone(zoneName, tokenKey, fqdns) {
 
       try {
         const domains = await listPagesDomains(pagesInfo.accountId, pagesInfo.projectName, pagesInfo.tokenKey);
-        const exists = domains.some(d => d.name === originCname);
-        if (exists) {
-          console.log(`      域名已存在 → 跳过`);
+        const matched = domains.find(d => d.name === originCname);
+        if (matched) {
+          console.log(`      域名已存在 (status: ${matched.status || 'unknown'}) → 跳过`);
         } else {
           console.log(`      添加自定义域名 ${originCname}...`);
           await addPagesDomain(pagesInfo.accountId, pagesInfo.projectName, originCname, pagesInfo.tokenKey);
