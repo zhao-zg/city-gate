@@ -190,9 +190,11 @@ function testDownloadSpeed(ip, testSec, speedHost) {
 
   return new Promise((resolve) => {
     const start = Date.now();
-    const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量
+    const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量（保底）
+    const speedLimitMs = testSec * 1000;   // 测速时长到了就停，不等下完 10MB
     let settled = false;
     let totalDownloaded = 0;
+    let speedTimer = null;
     const pendingTimers = new Set();
 
     // keep-alive agent 复用 TCP 连接
@@ -235,6 +237,9 @@ function testDownloadSpeed(ip, testSec, speedHost) {
         finish();
         return;
       }
+      // 收到响应头后启动测速计时器，测速时长到了就结束
+      speedTimer = setTimeout(finish, speedLimitMs);
+      pendingTimers.add(speedTimer);
       res.on('data', (chunk) => {
         if (!settled) totalDownloaded += chunk.length;
       });
