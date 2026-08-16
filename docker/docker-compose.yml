@@ -28,6 +28,7 @@ services:
       - MIN_SPEED_KBPS=${MIN_SPEED_KBPS:-500}
       - SPEED_TEST_SEC=${SPEED_TEST_SEC:-2}
       - MAX_LATENCY_MS=${MAX_LATENCY_MS:-300}
+      # ── 测速模式：fast=达标即停 / best=全部测完选最优 / off=跳过测速 ──
       - SPEED_TEST_MODE=${SPEED_TEST_MODE:-fast}
       - MAX_SPEED_TEST_COUNT=${MAX_SPEED_TEST_COUNT:-20}
       # ── 测速域名（留空=自动检测，需为已部署 Worker 的域名） ──

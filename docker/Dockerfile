@@ -36,6 +36,7 @@ ENV IP_DEDUP_PREFIX="32"
 ENV MIN_SPEED_KBPS="500"
 ENV SPEED_TEST_SEC="2"
 ENV MAX_LATENCY_MS="300"
+# 测速模式：fast=达标即停 / best=全部测完选最优 / off=跳过测速
 ENV SPEED_TEST_MODE="fast"
 ENV MAX_SPEED_TEST_COUNT="20"
 # 测速域名（留空=自动检测，需为已部署 Worker 的域名，Worker 需有 /__down 路由）
