@@ -168,11 +168,11 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
  *
  * 策略：
  *   - 使用 HTTPS 443 端口（通过 Worker 代理，不经过 CF WAF 拦截）
- *   - 每次请求 10MB，下载完自动续传，持续满测速时长
- *   - 2 个并发请求提高吞吐量测量准确性
+ *   - 单连接下载，每次请求 10MB，下载完结束
+ *   - 连接超时 3s：TCP/TLS 握手未完成立即终止，不等满硬超时
  *   - keep-alive 复用 TCP 连接，避免反复握手开销
  *
- * 返回 { speed_kbps, downloaded, duration_ms, requests } 或 null（失败）
+ * 返回 { speed_kbps, downloaded, duration_ms } 或 null（失败）
  */
 function testDownloadSpeed(ip, testSec, speedHost) {
   // 每次请求下载 10MB 随机数据
