@@ -32,7 +32,11 @@
 const CF_API = 'https://api.cloudflare.com/client/v4';
 const fs = require('fs');
 const https = require('https');
+const http = require('http');
 const path = require('path');
+
+// ── 短命请求用 Agent：关闭 keep-alive，用完立即释放 TCP 连接 ──
+const _noKeepAliveAgent = new https.Agent({ keepAlive: false });
 
 // ── Worker → 账户 Token 映射 ──────────────────────────────
 // key = wrangler.toml 中的 name（即 Worker 名），value = 环境变量 Token key
@@ -375,7 +379,7 @@ async function resolveIps(domain) {
   try {
     const dohUrl = `https://cloudflare-dns.com/dns-query?name=${domain}&type=A`;
     const dohRes = await fetch(dohUrl, {
-      headers: { Accept: 'application/dns-json' },
+      headers: { Accept: 'application/dns-json', Connection: 'close' },
       signal: AbortSignal.timeout(POOL_CHECK_TIMEOUT),
     });
     const dohJson = await dohRes.json();
@@ -451,6 +455,7 @@ function testIp1034Once(ip, testHost) {
       method: 'GET',
       timeout: POOL_CHECK_TIMEOUT,
       rejectUnauthorized: false,  // 忽略证书不匹配（不影响可用性判定）
+      agent: _noKeepAliveAgent,
     }, (res) => {
       activeRes = res;
       extractColo(res);
@@ -649,7 +654,8 @@ async function fetchCfIpTop20() {
     const res = await fetch(POOL_API, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
+        Accept: 'application/json',
+        Connection: 'close',
       },
       signal: AbortSignal.timeout(15000),
     });
@@ -800,6 +806,7 @@ async function cfFetch(path, options = {}) {
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      Connection: 'close',  // 禁用 keep-alive，用完即关，避免 cron 空闲时 conntrack 堆积
       ...fetchOptions.headers,
     },
   });
@@ -966,6 +973,10 @@ async function main() {
   if (totalStats.errors > 0) {
     process.exit(1);
   }
+
+  // 清理 keep-alive 连接（cron 模式下进程不退出，空闲 socket 持续占用 fd/conntrack）
+  https.globalAgent.destroy();
+  http.globalAgent.destroy();
 }
 
 if (require.main === module) {
@@ -1004,6 +1015,7 @@ const CF_IPV4_FALLBACK = [
 async function fetchCfIpv4Ranges() {
   try {
     const resp = await fetch('https://www.cloudflare.com/ips-v4', {
+      headers: { Connection: 'close' },
       signal: AbortSignal.timeout(10000),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

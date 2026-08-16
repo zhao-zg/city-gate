@@ -43,6 +43,10 @@ const http = require('http');
 const net = require('net');
 const sc = require('./sync-cname');
 
+// ── 短命请求用 Agent：关闭 keep-alive，用完立即释放 TCP 连接 ──
+// 避免 cron 空闲期间 conntrack/fd 被大量 keep-alive socket 占用
+const _noKeepAliveAgent = new https.Agent({ keepAlive: false });
+
 // ── 配置 ─────────────────────────────────────────────
 const IP_PER_ZONE = parseInt(process.env.IP_PER_ZONE || '2', 10);
 const IP_DEDUP_PREFIX = parseInt(process.env.IP_DEDUP_PREFIX || '32', 10);
@@ -287,6 +291,7 @@ function checkSslCert(fqdn) {
       method: 'HEAD',
       timeout: 5000,
       rejectUnauthorized: false,
+      agent: _noKeepAliveAgent,
     }, () => {
       resolve(true); // 握手成功 = 有证书
     });
@@ -421,6 +426,7 @@ function checkConnectivity(fqdn, ip) {
       method: 'GET',
       timeout: CHECK_TIMEOUT,
       rejectUnauthorized: false,
+      agent: _noKeepAliveAgent,
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' },
     };
 
@@ -1352,12 +1358,20 @@ async function main() {
         console.log(`    ✗ ${r.fqdn}: ${r.reason}`);
       }
     }
-    process.exit(1);
   }
+
+  // 清理 keep-alive 连接：Node.js https.globalAgent 默认 keepAlive=true，
+  // cron 模式下进程不退出，空闲 socket 会一直挂着占用 fd 和 conntrack；
+  // fetch() 内部也复用 globalAgent，必须显式销毁
+  https.globalAgent.destroy();
+  http.globalAgent.destroy();
+  return hasError ? 1 : 0;
 }
 
 if (require.main === module) {
-  main().catch(e => {
+  main().then(exitCode => {
+    if (exitCode) process.exit(exitCode);
+  }).catch(e => {
     console.error('致命错误:', e.message);
     process.exit(1);
   });
