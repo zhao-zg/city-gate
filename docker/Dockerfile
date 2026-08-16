@@ -46,6 +46,10 @@ ENV COLO_FILTER=""
 ENV LATENCY_SAMPLES="10"
 # 丢包率上限，超过则过滤（默认 0.1 = 10%）
 ENV MAX_PACKET_LOSS_RATE="0.1"
+# IP 来源：domain=域名解析 / cidr=CF CIDR扫描 / both=两者合并 / 自定义(CIDR,IP,域名混合)
+ENV IP_SOURCE="domain"
+# 每个 CIDR 最多采样 IP 数（默认 100）
+ENV CIDR_SAMPLES="100"
 # Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
 ENV ZONE_CONFIG_JSON=""
 

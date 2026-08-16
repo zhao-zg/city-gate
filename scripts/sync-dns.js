@@ -29,6 +29,8 @@
  *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
  *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次不取平均）
  *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.1 = 10%）
+ *   IP_SOURCE（可选）     — IP 来源：domain=域名解析(默认) / cidr=CF CIDR扫描 / both=两者合并 / 自定义(CIDR,IP,域名混合)
+ *   CIDR_SAMPLES（可选）  — 每个 CIDR 最多采样 IP 数（默认 100）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -62,6 +64,10 @@ const COLO_FILTER = process.env.COLO_FILTER
 const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '10', 10), 1), 20);
 // 丢包率上限，超过则过滤（默认 0.1 = 10%）
 const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.1');
+// IP 来源模式：domain / cidr / both / 自定义字符串
+const IP_SOURCE = process.env.IP_SOURCE || 'domain';
+// 每个 CIDR 最多采样 IP 数
+const CIDR_SAMPLES = parseInt(process.env.CIDR_SAMPLES || '100', 10);
 
 // ── IP 质量检测 ──────────────────────────────────────
 
@@ -419,22 +425,62 @@ async function buildIpPool(testHost, needCount) {
   console.log(`  延迟上限: ${latencyDesc}`);
   console.log(`  每 zone: ${IP_PER_ZONE} 个 IP，共需 ${needCount} 个\n`);
 
-  // 第1步：从 CNAME_POOL 收集 IP
-  console.log('  [1] 从优选域名池解析 IP...');
+  // 第1步：收集候选 IP（根据 IP_SOURCE 模式）
   const rawIps = new Set();
 
-  for (const domain of sc.CNAME_POOL) {
-    const ips = await sc.resolveIps(domain);
-    for (const ip of ips) {
-      if (!sc.is1034Ip(ip)) {
-        rawIps.add(ip);
+  const useDomain = IP_SOURCE === 'domain' || IP_SOURCE === 'both';
+  const useCidr = IP_SOURCE === 'cidr' || IP_SOURCE === 'both';
+  const isCustom = !['domain', 'cidr', 'both'].includes(IP_SOURCE);
+
+  if (isCustom) {
+    // 自定义模式：解析用户输入的 CIDR/IP/域名混合
+    console.log('  [1] 从自定义来源收集 IP...');
+    const { cidrs, singleIps, domains } = sc.parseCustomIpSource(IP_SOURCE);
+    if (cidrs.length > 0) {
+      const cidrIps = sc.sampleIpsFromCidrList(cidrs, CIDR_SAMPLES);
+      for (const ip of cidrIps) rawIps.add(ip);
+      console.log(`    CIDR ${cidrs.join(', ')} → ${cidrIps.length} 个 IP（每段最多 ${CIDR_SAMPLES}）`);
+    }
+    for (const ip of singleIps) {
+      rawIps.add(ip);
+      console.log(`    单 IP ${ip}`);
+    }
+    for (const domain of domains) {
+      const ips = await sc.resolveIps(domain);
+      for (const ip of ips) rawIps.add(ip);
+      console.log(`    ${domain.padEnd(32)} → ${ips.length} 个 IP`);
+    }
+  } else {
+    if (useDomain) {
+      console.log('  [1] 从优选域名池解析 IP...');
+      for (const domain of sc.CNAME_POOL) {
+        const ips = await sc.resolveIps(domain);
+        for (const ip of ips) {
+          if (!sc.is1034Ip(ip)) {
+            rawIps.add(ip);
+          }
+        }
+        console.log(`    ${domain.padEnd(32)} → ${ips.length} 个 IP`);
       }
     }
-    console.log(`    ${domain.padEnd(32)} → ${ips.length} 个 IP`);
+
+    if (useCidr) {
+      console.log(useDomain ? '\n  [1b] 从 CF CIDR 范围采样 IP...' : '  [1] 从 CF CIDR 范围采样 IP...');
+      const cfRanges = await sc.fetchCfIpv4Ranges();
+      console.log(`    CF IPv4 段: ${cfRanges.length} 个，每段采样 ${CIDR_SAMPLES} 个`);
+      const cidrIps = sc.sampleIpsFromCidrList(cfRanges, CIDR_SAMPLES);
+      const before = rawIps.size;
+      for (const ip of cidrIps) {
+        if (!sc.is1034Ip(ip)) {
+          rawIps.add(ip);
+        }
+      }
+      console.log(`    CIDR 采样: ${cidrIps.length} 个，新增 ${rawIps.size - before} 个（去重后）`);
+    }
   }
 
   if (rawIps.size === 0) {
-    throw new Error('未能从优选域名池收集到任何 IP！');
+    throw new Error('未能收集到任何候选 IP！');
   }
 
   // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 10 个并发，避免触发 CF 限速）

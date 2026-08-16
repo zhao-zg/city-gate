@@ -957,6 +957,158 @@ if (require.main === module) {
   main();
 }
 
+// ── Cloudflare CIDR IP 扫描 ──────────────────────────
+
+/**
+ * Cloudflare 官方 IPv4 段（硬编码兜底）
+ * 来源: https://www.cloudflare.com/ips-v4
+ * 当自动拉取失败时使用此列表
+ */
+const CF_IPV4_FALLBACK = [
+  '173.245.48.0/20',
+  '103.21.244.0/22',
+  '103.22.200.0/22',
+  '103.31.4.0/22',
+  '141.101.64.0/18',
+  '108.162.192.0/18',
+  '190.93.240.0/20',
+  '188.114.96.0/20',
+  '197.234.240.0/22',
+  '198.41.128.0/17',
+  '162.158.0.0/15',
+  '104.16.0.0/13',
+  '104.24.0.0/14',
+  '172.64.0.0/13',
+  '131.0.72.0/22',
+];
+
+/**
+ * 从 Cloudflare 官方 API 拉取 IPv4 段
+ * 失败时回退到硬编码列表
+ */
+async function fetchCfIpv4Ranges() {
+  try {
+    const resp = await fetch('https://www.cloudflare.com/ips-v4', {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const text = await resp.text();
+    const ranges = text.trim().split('\n').map(s => s.trim()).filter(Boolean);
+    if (ranges.length === 0) throw new Error('空列表');
+    console.log(`    CF 官方 IPv4 段: ${ranges.length} 个（在线获取）`);
+    return ranges;
+  } catch (e) {
+    console.log(`    CF 官方 IPv4 段拉取失败 (${e.message})，使用硬编码兜底 (${CF_IPV4_FALLBACK.length} 个)`);
+    return CF_IPV4_FALLBACK;
+  }
+}
+
+/**
+ * 将 CIDR 转换为整数范围
+ * 返回 { start, end }（无符号 32 位整数）
+ */
+function cidrToRange(cidr) {
+  const [ipStr, prefixLenStr] = cidr.split('/');
+  const prefixLen = parseInt(prefixLenStr, 10);
+  const parts = ipStr.split('.').map(p => parseInt(p, 10));
+  const ipInt = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+  // 确保无符号
+  const ipUInt = ipInt >>> 0;
+  const hostBits = 32 - prefixLen;
+  const mask = hostBits === 32 ? 0 : (0xFFFFFFFF << hostBits) >>> 0;
+  const start = (ipUInt & mask) >>> 0;
+  const end = (start | ((~mask) >>> 0)) >>> 0;
+  return { start, end, prefixLen };
+}
+
+/**
+ * 将无符号 32 位整数转为 IP 字符串
+ */
+function intToIp(int) {
+  return [
+    (int >>> 24) & 0xFF,
+    (int >>> 16) & 0xFF,
+    (int >>> 8) & 0xFF,
+    int & 0xFF,
+  ].join('.');
+}
+
+/**
+ * 从 CIDR 网段中随机采样 IP
+ * 策略（参考 CFnat）：
+ *   - 按 /24 分段，每个 /24 段内随机取 1 个 IP
+ *   - /24 及更小网段直接取 1 个
+ *   - 大网段（如 /13）会产生大量采样，需配合 samplesPerSubnet 限制
+ *
+ * 参数：
+ *   cidr       — CIDR 字符串，如 "104.16.0.0/13"
+ *   maxSamples — 该 CIDR 最多采样多少个 IP（默认 100）
+ * 返回 IP 字符串数组
+ */
+function sampleIpsFromCidr(cidr, maxSamples = 100) {
+  const { start, end, prefixLen } = cidrToRange(cidr);
+  const rangeSize = (end - start + 1) >>> 0;
+
+  if (rangeSize === 1) return [intToIp(start)];
+
+  // 计算采样步长：均匀分布
+  const actualSamples = Math.min(maxSamples, rangeSize);
+  const step = Math.max(1, Math.floor(rangeSize / actualSamples));
+  const result = [];
+
+  for (let i = 0; i < actualSamples; i++) {
+    // 在每个步长区间内随机取一个 IP
+    const segStart = (start + i * step) >>> 0;
+    const segEnd = Math.min((segStart + step - 1) >>> 0, end);
+    const randomOffset = segEnd === segStart ? 0 : Math.floor(Math.random() * (segEnd - segStart + 1));
+    result.push(intToIp((segStart + randomOffset) >>> 0));
+  }
+
+  return result;
+}
+
+/**
+ * 从 CIDR 列表批量采样 IP
+ * 返回去重后的 IP 数组
+ */
+function sampleIpsFromCidrList(cidrList, maxPerCidr = 100) {
+  const ips = new Set();
+  for (const cidr of cidrList) {
+    const sampled = sampleIpsFromCidr(cidr, maxPerCidr);
+    for (const ip of sampled) {
+      ips.add(ip);
+    }
+  }
+  return [...ips];
+}
+
+/**
+ * 解析自定义 IP 来源字符串
+ * 支持格式：
+ *   - CIDR:  104.16.0.0/13,172.64.0.0/13
+ *   - 单 IP: 1.2.3.4,5.6.7.8
+ *   - 域名:  example.com,cdn.example.com（会做 DNS 解析）
+ *   - 混合:  104.16.0.0/13,1.2.3.4,example.com
+ */
+function parseCustomIpSource(sourceStr) {
+  const items = sourceStr.split(',').map(s => s.trim()).filter(Boolean);
+  const cidrs = [];
+  const singleIps = [];
+  const domains = [];
+
+  for (const item of items) {
+    if (item.includes('/')) {
+      cidrs.push(item);
+    } else if (/^\d+\.\d+\.\d+\.\d+$/.test(item)) {
+      singleIps.push(item);
+    } else {
+      domains.push(item);
+    }
+  }
+
+  return { cidrs, singleIps, domains };
+}
+
 // ── 导出（供其他脚本复用，如 setup-saas.js、check-dns.js） ──
 module.exports = {
   autoDetectZoneMap,
@@ -986,4 +1138,11 @@ module.exports = {
   getToken,
   cfFetch,
   CNAME_POOL,
+  CF_IPV4_FALLBACK,
+  fetchCfIpv4Ranges,
+  cidrToRange,
+  intToIp,
+  sampleIpsFromCidr,
+  sampleIpsFromCidrList,
+  parseCustomIpSource,
 };
