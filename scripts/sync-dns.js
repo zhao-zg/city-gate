@@ -50,7 +50,7 @@ const MIN_SPEED_KBPS = parseInt(process.env.MIN_SPEED_KBPS || '500', 10);
 const SPEED_TEST_SEC = parseInt(process.env.SPEED_TEST_SEC || '2', 10);
 // 延迟上限（ms），超过的 IP 不参与测速（0 = 不限制）
 const MAX_LATENCY_MS = parseInt(process.env.MAX_LATENCY_MS || '300', 10);
-// 测速模式：fast = 达标即停 / best = 全部测完选最优
+// 测速模式：fast = 达标即停 / best = 全部测完选最优 / off = 跳过测速
 const SPEED_TEST_MODE = process.env.SPEED_TEST_MODE || 'fast';
 // best 模式下最大测速 IP 数（避免串行测速耗时过长）
 const MAX_SPEED_TEST_COUNT = parseInt(process.env.MAX_SPEED_TEST_COUNT || '20', 10);
@@ -179,6 +179,8 @@ function testDownloadSpeed(ip, testSec, speedHost) {
   const CHUNK_BYTES = 10 * 1024 * 1024;
   // 测速端口（443 = HTTPS，通过 Worker 代理不经过 WAF）
   const SPEED_PORT = 443;
+  // 连接超时：TCP 连接 + TLS 握手超过 3s 未完成则立即终止
+  const CONNECT_TIMEOUT_MS = 3000;
 
   return new Promise((resolve) => {
     const start = Date.now();
@@ -232,6 +234,21 @@ function testDownloadSpeed(ip, testSec, speedHost) {
       });
       res.on('end', () => { if (!settled) finish(); });
       res.on('error', () => { if (!settled) finish(); });
+    });
+
+    // 连接超时：TCP 连接或 TLS 握手超过 3s 未完成则立即终止
+    // 避免 IP 不可达或证书缺失时等满整个硬超时（可能 10s+）
+    req.on('socket', (socket) => {
+      const connectTimer = setTimeout(() => {
+        if (!settled) req.destroy(); // 触发 error → finish
+      }, CONNECT_TIMEOUT_MS);
+      pendingTimers.add(connectTimer);
+
+      // TLS 握手成功，清除连接超时
+      socket.on('secureConnect', () => {
+        clearTimeout(connectTimer);
+        pendingTimers.delete(connectTimer);
+      });
     });
 
     req.on('timeout', () => { req.destroy(); });
@@ -950,9 +967,11 @@ async function main() {
   // 第二步：测速筛选
   // fast = 从低延迟开始逐个测速，凑够 needCount 个达标即停
   // best = 全部测完后按速度排序，选最快的 needCount 个
+  // off  = 跳过测速，直接用延迟+丢包率排序结果
   // ═══════════════════════════════════════════════════
 
   const isBestMode = SPEED_TEST_MODE === 'best';
+  const isOffMode = SPEED_TEST_MODE === 'off';
 
   // 确定测速域名：优先使用环境变量，否则用 testHost（已部署 Worker 的域名）
   const speedHost = SPEED_TEST_HOST || testHost;
@@ -960,6 +979,35 @@ async function main() {
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  第二步：测速筛选');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  // ── off 模式：跳过测速，直接用 ipPool（已按延迟排序）构建 speedResults ──
+  if (isOffMode) {
+    console.log('  模式: off（跳过测速，仅按延迟+丢包率排序）');
+    console.log(`  可用 IP: ${ipPool.length} 个（取前 ${needCount} 个）`);
+    console.log('');
+
+    if (ipPool.length === 0) {
+      throw new Error('没有可用的 IP！');
+    }
+
+    const offPool = ipPool.slice(0, needCount);
+    console.log('  选中 IP（按延迟排序）:');
+    for (const r of offPool) {
+      const coloStr = r.colo ? `[${r.colo}] ` : '';
+      const sampleStr = r.samples && r.samples.length > 1
+        ? ` (${r.samples.map(s => s === null ? '×' : s).join('/')})`
+        : '';
+      console.log(`    ✓ ${r.ip.padEnd(18)} (${r.latency}ms)${sampleStr} ${coloStr}`);
+    }
+    if (offPool.length < needCount) {
+      console.log(`\n  ⚠ 仅 ${offPool.length} 个 IP，不足 ${needCount}，将跨 zone 复用`);
+    }
+
+    // 直接用 offPool 作为 speedResults（无需 speed_kbps 字段，后续不再使用）
+    speedResults = offPool.map(r => ({ ip: r.ip, latency: r.latency, colo: r.colo || null, speed_kbps: 0 }));
+
+  } else {
+
   console.log(`  模式: ${isBestMode ? 'best（全部测完选最优）' : 'fast（达标即停）'}`);
   console.log(`  测速域名: ${speedHost}（HTTPS 443，Worker 代理）`);
   console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
@@ -970,7 +1018,7 @@ async function main() {
   }
   console.log('');
 
-  const speedResults = []; // { ip, latency, speed_kbps }
+  speedResults = []; // { ip, latency, speed_kbps }
   const testedIps = new Set();
 
   // best 模式限制最大测速 IP 数，避免串行测速耗时过长
@@ -1069,6 +1117,8 @@ async function main() {
     }
   }
 
+  } // end else (非 off 模式的测速逻辑)
+
   if (speedResults.length === 0) {
     throw new Error('没有测速达标的 IP！');
   }
@@ -1087,10 +1137,11 @@ async function main() {
   }
 
   // 测速结果一览
-  console.log('\n  测速达标 IP:');
+  console.log('\n  选中 IP:');
   for (const r of speedResults) {
     const coloStr = r.colo ? `[${r.colo}] ` : '';
-    console.log(`    ✓ ${r.ip.padEnd(18)} ${r.speed_kbps} KB/s  (${r.latency}ms) ${coloStr}`);
+    const speedStr = r.speed_kbps > 0 ? `${r.speed_kbps} KB/s  ` : '';
+    console.log(`    ✓ ${r.ip.padEnd(18)} ${speedStr}(${r.latency}ms) ${coloStr}`);
   }
 
   // ═══════════════════════════════════════════════════
@@ -1213,7 +1264,7 @@ async function main() {
   console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  最终汇总');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`  IP 池:   达标 ${speedResults.length}/${needCount}（去重后 ${ipPool.length} 个候选）`);
+  console.log(`  IP 池:   选中 ${speedResults.length}/${needCount}（去重后 ${ipPool.length} 个候选${isOffMode ? '，未测速' : ''}）`);
   console.log(`  DNS 同步: 创建 ${syncStats.created}  删除 ${syncStats.deleted}  跳过 ${syncStats.skipped}  错误 ${syncStats.errors}`);
   console.log(`  连通性:   正常 ${connOk}  异常 ${connBad}  跳过 ${connSkip}`);
 
