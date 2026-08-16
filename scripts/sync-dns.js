@@ -27,8 +27,8 @@
  *   MAX_SPEED_TEST_COUNT（可选）— best 模式下最大测速 IP 数（默认 20）
  *   SPEED_TEST_HOST（可选）  — 测速域名（默认自动检测，需为 Worker 路由域名）
  *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
- *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 3，1=单次不取平均）
- *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.3 = 30%）
+ *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次不取平均）
+ *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.1 = 10%）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -58,10 +58,10 @@ const SPEED_TEST_HOST = process.env.SPEED_TEST_HOST || '';
 const COLO_FILTER = process.env.COLO_FILTER
   ? process.env.COLO_FILTER.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
   : [];
-// 延迟采样次数（默认 3，1=单次不取平均）
-const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '3', 10), 1), 10);
-// 丢包率上限，超过则过滤（默认 0.3 = 30%）
-const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.3');
+// 延迟采样次数（默认 10，1=单次不取平均）
+const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '10', 10), 1), 20);
+// 丢包率上限，超过则过滤（默认 0.1 = 10%）
+const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.1');
 
 // ── IP 质量检测 ──────────────────────────────────────
 

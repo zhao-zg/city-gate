@@ -35,9 +35,9 @@ services:
       # ── 数据中心过滤（逗号分隔，如 HKG,LAX；留空=不过滤） ──
       - COLO_FILTER=${COLO_FILTER:-}
       # ── 延迟采样次数（默认 3，1=单次不取平均） ──
-      - LATENCY_SAMPLES=${LATENCY_SAMPLES:-3}
-      # ── 丢包率上限，超过则过滤（默认 0.3 = 30%） ──
-      - MAX_PACKET_LOSS_RATE=${MAX_PACKET_LOSS_RATE:-0.3}
+      - LATENCY_SAMPLES=${LATENCY_SAMPLES:-10}
+      # ── 丢包率上限，超过则过滤（默认 0.1 = 10%） ──
+      - MAX_PACKET_LOSS_RATE=${MAX_PACKET_LOSS_RATE:-0.1}
       # ── Zone 配置覆盖（可选，JSON 字符串，留空则使用镜像内 wrangler.toml） ──
       - ZONE_CONFIG_JSON=${ZONE_CONFIG_JSON:-}
     volumes:

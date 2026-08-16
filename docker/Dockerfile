@@ -42,10 +42,10 @@ ENV MAX_SPEED_TEST_COUNT="20"
 ENV SPEED_TEST_HOST=""
 # 数据中心过滤（逗号分隔，如 HKG,LAX；留空=不过滤，仅展示）
 ENV COLO_FILTER=""
-# 延迟采样次数（默认 3，1=单次不取平均）
-ENV LATENCY_SAMPLES="3"
-# 丢包率上限，超过则过滤（默认 0.3 = 30%）
-ENV MAX_PACKET_LOSS_RATE="0.3"
+# 延迟采样次数（默认 10，1=单次不取平均）
+ENV LATENCY_SAMPLES="10"
+# 丢包率上限，超过则过滤（默认 0.1 = 10%）
+ENV MAX_PACKET_LOSS_RATE="0.1"
 # Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
 ENV ZONE_CONFIG_JSON=""
 
