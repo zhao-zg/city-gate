@@ -1048,6 +1048,9 @@ async function main() {
   console.log('  第二步：测速筛选');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+  let speedResults; // { ip, latency, speed_kbps }（达标）
+  let subparResults = []; // { ip, latency, colo, speed_kbps }（测速成功但未达标，供降级补充）
+
   // ── off 模式：跳过测速，直接用 ipPool（已按延迟排序）构建 speedResults ──
   if (isOffMode) {
     console.log('  模式: off（跳过测速，仅按延迟+丢包率排序）');
@@ -1087,7 +1090,7 @@ async function main() {
   console.log('');
 
   speedResults = []; // { ip, latency, speed_kbps }（达标）
-  const subparResults = []; // { ip, latency, colo, speed_kbps }（测速成功但未达标，供降级补充）
+  subparResults = []; // { ip, latency, colo, speed_kbps }（测速成功但未达标，供降级补充）
   const testedIps = new Set();
 
   // best 模式限制最大测速 IP 数，避免串行测速耗时过长
