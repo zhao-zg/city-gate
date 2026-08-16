@@ -384,13 +384,13 @@ async function ensureSslCerts(fqdnList) {
         continue;
       }
 
-      // 创建保底记录（1.1.1.1 不访问源站，proxied=true 仅作证书保底）
+      // 创建保底记录（192.0.2.1 是文档保留 IP，CF 允许 proxied 记录指向它）
       await sc.cfFetch(`/zones/${zoneId}/dns_records`, {
         method: 'POST',
-        body: JSON.stringify({ type: 'A', name: SSL_KEEPALIVE_NAME, content: '1.1.1.1', proxied: true, ttl: 1 }),
+        body: JSON.stringify({ type: 'A', name: SSL_KEEPALIVE_NAME, content: '192.0.2.1', proxied: true, ttl: 1 }),
         tokenKey: z.tokenKey,
       });
-      console.log(`    ✓ ${keepaliveFqdn} → A 1.1.1.1 proxied=true（已创建）`);
+      console.log(`    ✓ ${keepaliveFqdn} → A 192.0.2.1 proxied=true（已创建）`);
     } catch (e) {
       console.log(`    ✗ 操作失败: ${e.message}`);
     }
