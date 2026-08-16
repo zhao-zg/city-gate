@@ -506,44 +506,47 @@ async function buildIpPool(testHost, needCount) {
     throw new Error('未能收集到任何候选 IP！');
   }
 
-  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 20 个并发，避免触发 CF 限速）
+  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（固定并发池，谁完成谁输出，不互相等待）
   const coloDesc = COLO_FILTER.length > 0 ? `，colo 过滤: ${COLO_FILTER.join(',')}` : '';
   console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个，采样 ${LATENCY_SAMPLES} 次${coloDesc}）...`);
 
   async function checkIpBatch(ipSet) {
     const ipList = [...ipSet];
-    const BATCH_SIZE = 20;
-    const allResults = [];
+    const CONCURRENCY = 20;        // 固定并发数
     const total = ipList.length;
+    const allResults = [];
     let done = 0;
 
-    for (let i = 0; i < ipList.length; i += BATCH_SIZE) {
-      const batch = ipList.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(
-        batch.map(async (ip) => {
-          const check = await sc.testIp1034(ip, testHost);
-          const colo = check.colo || null;
-          if (!check.ok) {
-            return { ip, ok: false, reason: check.reason, latency: null, colo, samples: [], successCount: 0, totalCount: 0 };
-          }
-          // 复用 1034 检测的 TLS 握手延迟作为第一次采样，省一次 TCP 连接
-          const firstLatency = check.connectLatency || null;
-          const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES, 443, firstLatency);
-          if (avgLatency === null) {
-            return { ip, ok: false, reason: 'TCP 连接失败', latency: null, colo, samples, successCount, totalCount };
-          }
-          return { ip, ok: true, reason: check.reason, latency: avgLatency, colo, samples, successCount, totalCount };
-        })
-      );
-      allResults.push(...batchResults);
-      done += batchResults.length;
+    // 单个 IP 检测任务
+    async function checkOneIp(ip) {
+      const check = await sc.testIp1034(ip, testHost);
+      const colo = check.colo || null;
+      if (!check.ok) {
+        return { ip, ok: false, reason: check.reason, latency: null, colo, samples: [], successCount: 0, totalCount: 0 };
+      }
+      // 复用 1034 检测的 TLS 握手延迟作为第一次采样，省一次 TCP 连接
+      const firstLatency = check.connectLatency || null;
+      const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES, 443, firstLatency);
+      if (avgLatency === null) {
+        return { ip, ok: false, reason: 'TCP 连接失败', latency: null, colo, samples, successCount, totalCount };
+      }
+      return { ip, ok: true, reason: check.reason, latency: avgLatency, colo, samples, successCount, totalCount };
+    }
 
-      // 逐批打印进度 + 当前批次结果
-      console.log(`  ── 进度 ${done}/${total} ──`);
-      for (const r of batchResults) {
+    // 并发池：维护固定并发数，谁完成谁打印谁腾位置
+    let cursor = 0;
+    async function worker() {
+      while (cursor < ipList.length) {
+        const ip = ipList[cursor++];
+        const r = await checkOneIp(ip);
+        allResults.push(r);
+        done++;
+        console.log(`  ── ${done}/${total} ──`);
         printIpResult(r);
       }
     }
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ipList.length) }, () => worker()));
 
     return allResults;
   }
