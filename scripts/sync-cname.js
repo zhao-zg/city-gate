@@ -515,7 +515,8 @@ async function testIp1034(ip, testHost) {
     if (last.ok) return last;                                  // 可用
     if (/1034/i.test(last.reason)) return last;                // 硬判定
     if (/挑战页|验证码/i.test(last.reason)) return last;       // 硬判定（WAF 拦截）
-    // 软错误 → 继续重试
+    if (/ECONNRESET|ECONNREFUSED|ENETUNREACH/i.test(last.reason)) return last; // 硬判定（RST/拒绝/不可达，重试无用）
+    // 软错误（超时等偶发）→ 继续重试
   }
   return last;
 }
