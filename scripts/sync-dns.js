@@ -190,7 +190,7 @@ function testDownloadSpeed(ip, testSec, speedHost) {
 
   return new Promise((resolve) => {
     const start = Date.now();
-    const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量（保底）
+    const timeoutMs = (testSec + 3) * 1000; // 硬超时 = 连接超时(3s) + 测速时长，纯保底
     const speedLimitMs = testSec * 1000;   // 测速时长到了就停，不等下完 10MB
     let settled = false;
     let totalDownloaded = 0;
