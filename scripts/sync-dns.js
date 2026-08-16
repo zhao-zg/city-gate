@@ -1086,7 +1086,8 @@ async function main() {
   }
   console.log('');
 
-  speedResults = []; // { ip, latency, speed_kbps }
+  speedResults = []; // { ip, latency, speed_kbps }（达标）
+  const subparResults = []; // { ip, latency, colo, speed_kbps }（测速成功但未达标，供降级补充）
   const testedIps = new Set();
 
   // best 模式限制最大测速 IP 数，避免串行测速耗时过长
@@ -1110,6 +1111,8 @@ async function main() {
       console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
       if (result.speed_kbps >= MIN_SPEED_KBPS) {
         speedResults.push({ ip, latency, colo, speed_kbps: result.speed_kbps });
+      } else {
+        subparResults.push({ ip, latency, colo, speed_kbps: result.speed_kbps });
       }
     } else {
       console.log(`    ✗ 测速失败`);
@@ -1117,6 +1120,9 @@ async function main() {
   }
 
   console.log(`\n  测速结果: ${speedResults.length}/${needCount} 达标`);
+  if (subparResults.length > 0) {
+    console.log(`  降级候选: ${subparResults.length} 个（测速成功但未达标）`);
+  }
 
   // 池内 IP 测完仍不足且开启 cfIpTop20 补充时才拉取
   if (speedResults.length < needCount && ENABLE_CF_TOP20) {
@@ -1173,6 +1179,8 @@ async function main() {
             console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
             if (result.speed_kbps >= MIN_SPEED_KBPS) {
               speedResults.push({ ip, latency: avgLatency, colo, speed_kbps: result.speed_kbps });
+            } else {
+              subparResults.push({ ip, latency: avgLatency, colo, speed_kbps: result.speed_kbps });
             }
           } else {
             console.log(`    ✗ 测速失败`);
@@ -1190,7 +1198,16 @@ async function main() {
   } // end else (非 off 模式的测速逻辑)
 
   if (speedResults.length === 0) {
-    throw new Error('没有测速达标的 IP！');
+    // 0 个达标：降级补充候选，全部没有则保留旧记录不动
+    if (subparResults.length > 0) {
+      console.log(`\n  ⚠ 没有达标 IP，降级使用 ${subparResults.length} 个测速成功但未达标的 IP`);
+      // 按速度降序排列，优先用较快的
+      subparResults.sort((a, b) => b.speed_kbps - a.speed_kbps);
+      speedResults = subparResults.splice(0, needCount);
+    } else {
+      console.log('\n  ⚠ 没有达标 IP 也没有降级候选，保留现有 DNS 记录不变');
+      return;
+    }
   }
 
   // best 模式：全部测完后按速度排序，选最快的 needCount 个
@@ -1203,7 +1220,18 @@ async function main() {
   }
 
   if (speedResults.length < needCount) {
-    console.log(`\n  ⚠ 仅 ${speedResults.length} 个达标 IP，不足 ${needCount}，将跨 zone 复用`);
+    // 用降级候选补充不足的部分，避免跨 zone 复用同一 IP
+    const shortage = needCount - speedResults.length;
+    const subsAvailable = subparResults
+      .filter(r => !speedResults.some(s => s.ip === r.ip))
+      .sort((a, b) => b.speed_kbps - a.speed_kbps);
+    if (subsAvailable.length > 0) {
+      const fill = subsAvailable.slice(0, shortage);
+      speedResults.push(...fill);
+      console.log(`\n  ⚠ 达标 IP 不足，降级补充 ${fill.length} 个未达标但可用的 IP（速度 ${fill.map(r => r.speed_kbps).join('/')} KB/s）`);
+    } else if (speedResults.length > 0) {
+      console.log(`\n  ⚠ 仅 ${speedResults.length} 个 IP（已无降级候选），将跨 zone 复用`);
+    }
   }
 
   // 测速结果一览

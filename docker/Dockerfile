@@ -1,7 +1,7 @@
 FROM node:22-alpine
 
 # ── 安装 cron + tzdata + ca-certificates ──
-RUN apk add --no-cache dcron tzdata ca-certificates && \
+RUN apk add --no-cache dcron tzdata ca-certificates musl-locales && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
     echo "Asia/Shanghai" > /etc/TZ
@@ -23,6 +23,8 @@ RUN chmod +x /entrypoint.sh
 # ── 日志目录 ──
 RUN mkdir -p /var/log/city-gate
 
+ENV LANG=zh_CN.UTF-8
+ENV LC_ALL=zh_CN.UTF-8
 # 默认每 6 小时执行一次
 ENV CRON_SCHEDULE="0 */6 * * *"
 # 默认执行 CNAME 同步（可选: check = 仅检测不同步）

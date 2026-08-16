@@ -6,6 +6,8 @@ LOG_FILE="${LOG_DIR}/sync-$(date +%Y%m%d).log"
 # 确保日志目录存在
 mkdir -p "$LOG_DIR"
 
+LOCK_FILE="/tmp/city-gate.lock"
+
 # ── 通知函数（可选） ──
 notify() {
   local title="$1"
@@ -21,8 +23,24 @@ notify() {
   fi
 }
 
-# ── 执行脚本 ──
+# ── 执行脚本（带互斥锁） ──
 run_script() {
+  # 尝试获取锁：非阻塞，锁文件存在且持有进程存活则跳过
+  if [ -f "$LOCK_FILE" ]; then
+    local old_pid
+    old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] 上一次执行仍在运行 (PID $old_pid)，跳过本次"
+      return 0
+    fi
+    # 锁文件残留但进程已死，清理
+    rm -f "$LOCK_FILE"
+  fi
+
+  # 写入当前 PID
+  echo $$ > "$LOCK_FILE"
+  trap 'rm -f "$LOCK_FILE"' EXIT
+
   local mode="${RUN_MODE:-sync}"
   local script=""
 
@@ -35,6 +53,7 @@ run_script() {
       ;;
     *)
       echo "[ERROR] 未知 RUN_MODE: $mode（支持: sync / check）"
+      rm -f "$LOCK_FILE"
       exit 1
       ;;
   esac
@@ -48,6 +67,9 @@ run_script() {
 
   local exit_code=0
   node "$script" 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
+
+  rm -f "$LOCK_FILE"
+  trap - EXIT
 
   if [ "$exit_code" -ne 0 ]; then
     echo "[ERROR] 脚本执行失败 (exit: $exit_code)"
