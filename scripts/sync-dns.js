@@ -189,7 +189,7 @@ function testDownloadSpeed(ip, testSec, speedHost) {
   const CONNECT_TIMEOUT_MS = 3000;
 
   return new Promise((resolve) => {
-    const start = Date.now();
+    let downloadStart = null;           // 收到响应头时记录，速度只算下载时段
     const timeoutMs = (testSec + 3) * 1000; // 硬超时 = 连接超时(3s) + 测速时长，纯保底
     const speedLimitMs = testSec * 1000;   // 测速时长到了就停，不等下完 10MB
     let settled = false;
@@ -213,9 +213,11 @@ function testDownloadSpeed(ip, testSec, speedHost) {
       if (settled) return;
       settled = true;
       cleanup();
-      const elapsedSec = Math.max((Date.now() - start) / 1000, 0.001);
+      const elapsedSec = downloadStart
+        ? Math.max((Date.now() - downloadStart) / 1000, 0.001)
+        : 0.001;
       const speed_kbps = Math.round((totalDownloaded / 1024) / elapsedSec);
-      resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start });
+      resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: downloadStart ? Date.now() - downloadStart : 0 });
     };
 
     // 硬超时保底
@@ -237,7 +239,8 @@ function testDownloadSpeed(ip, testSec, speedHost) {
         finish();
         return;
       }
-      // 收到响应头后启动测速计时器，测速时长到了就结束
+      // 从收到响应头开始计时，速度只算纯下载时段
+      downloadStart = Date.now();
       speedTimer = setTimeout(finish, speedLimitMs);
       pendingTimers.add(speedTimer);
       res.on('data', (chunk) => {
