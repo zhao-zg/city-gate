@@ -211,8 +211,13 @@ function raceSuffix() {
   var promises = suffixes.map(function(suffix) {
     var start = Date.now();
     return fetch('https://apk.' + suffix + '/?_t=' + start, { method: 'HEAD', cache: 'no-store' })
-      .then(function() {
-        results[suffix] = Date.now() - start;
+      .then(function(r) {
+        // 只有 2xx/3xx 才算真正可访问，5xx/4xx（含 1034 等）视为不可用
+        if (r.status >= 200 && r.status < 400) {
+          results[suffix] = Date.now() - start;
+        } else {
+          results[suffix] = 99999;
+        }
       })
       .catch(function() {
         results[suffix] = 99999;
