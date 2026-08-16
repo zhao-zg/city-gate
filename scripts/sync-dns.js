@@ -281,6 +281,197 @@ function testDownloadSpeed(ip, testSec, speedHost) {
   });
 }
 
+// ── SSL 证书激活 ─────────────────────────────────────
+
+/**
+ * 检测 FQDN 是否有有效的 SSL 证书
+ * 通过 TLS 握手验证：能完成握手 → 有证书，RST/无证书 → 缺证书
+ */
+function checkSslCert(fqdn) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: fqdn,
+      path: '/',
+      method: 'HEAD',
+      timeout: 5000,
+      rejectUnauthorized: false,
+    }, () => {
+      resolve(true); // 握手成功 = 有证书
+    });
+    req.on('error', () => { resolve(false); });
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+/**
+ * 对 Zone 内任意一条 A 记录临时开启 proxied=true，触发 CF 签发 Universal SSL 证书
+ * 等待证书生效后切回 proxied=false
+ *
+ * 策略：每个 Zone 只需一条记录临时代理即可，CF 会为整个 Zone 签发通配符证书
+ *
+ * @param {Array} fqdnList - FQDN 列表
+ * @param {number} maxWaitSec - 最大等待秒数（默认 300 = 5 分钟）
+ * @returns {Array} 缺证书的 Zone 列表（空 = 全部正常）
+ */
+async function ensureSslCerts(fqdnList, maxWaitSec = 300) {
+  const dryRun = process.env.DRY_RUN === '1';
+
+  // 按 zone 分组，去重
+  const zoneMap = {};
+  for (const f of fqdnList) {
+    if (f.noPreferred && !f.origin) continue; // 跳过 noPreferred zone
+    if (!zoneMap[f.zoneName]) {
+      zoneMap[f.zoneName] = { tokenKey: f.tokenKey, fqdns: [] };
+    }
+    zoneMap[f.zoneName].fqdns.push(f.fqdn);
+  }
+
+  // 检测哪些 Zone 缺证书
+  console.log('\n── 检测 SSL 证书状态 ──');
+  const missingZones = [];
+  for (const [zoneName, group] of Object.entries(zoneMap)) {
+    // 用该 Zone 的第一个 FQDN 做快速检测
+    const testFqdn = group.fqdns[0];
+    const hasCert = await checkSslCert(testFqdn);
+    if (hasCert) {
+      console.log(`  ✓ ${zoneName} — SSL 证书正常`);
+    } else {
+      console.log(`  ✗ ${zoneName} — SSL 证书缺失（${testFqdn} TLS 握手失败）`);
+      missingZones.push({ zoneName, tokenKey: group.tokenKey, testFqdn });
+    }
+  }
+
+  if (missingZones.length === 0) {
+    console.log('\n  所有 Zone 的 SSL 证书均正常，无需激活');
+    return [];
+  }
+
+  console.log(`\n  需激活证书的 Zone: ${missingZones.map(z => z.zoneName).join(', ')}`);
+  console.log(`  方案: 临时 proxied=true 触发 CF 签发 Universal SSL 证书，生效后切回 proxied=false\n`);
+
+  if (dryRun) {
+    console.log('  ⚠  DRY_RUN 模式 — 跳过证书激活');
+    return missingZones;
+  }
+
+  // 对每个缺证书的 Zone，临时开 proxied=true
+  const activatedRecords = []; // { zoneId, recordId, zoneName, tokenKey } — 用于后续切回
+
+  for (const z of missingZones) {
+    console.log(`\n  ▸ ${z.zoneName}: 临时开启代理...`);
+    try {
+      const zoneId = await sc.getZoneId(z.zoneName, z.tokenKey);
+      const records = await sc.getDnsRecords(zoneId, z.testFqdn, z.tokenKey);
+      const aRecord = records.find(r => r.type === 'A');
+
+      if (!aRecord) {
+        console.log(`    ⚠  无 A 记录，跳过（DNS 可能尚未同步）`);
+        continue;
+      }
+
+      if (aRecord.proxied) {
+        console.log(`    已是 proxied=true，无需修改`);
+        // 仍然需要等待证书
+        activatedRecords.push({ zoneId, recordId: aRecord.id, testFqdn: z.testFqdn, zoneName: z.zoneName, tokenKey: z.tokenKey, wasProxied: true });
+        continue;
+      }
+
+      // 更新为 proxied=true
+      await sc.cfFetch(`/zones/${zoneId}/dns_records/${aRecord.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ type: 'A', name: aRecord.name, content: aRecord.content, proxied: true, ttl: 1 }),
+        tokenKey: z.tokenKey,
+      });
+      console.log(`    ✓ ${aRecord.name} → proxied=true（临时）`);
+      activatedRecords.push({ zoneId, recordId: aRecord.id, testFqdn: z.testFqdn, zoneName: z.zoneName, tokenKey: z.tokenKey, wasProxied: false });
+    } catch (e) {
+      console.log(`    ✗ 操作失败: ${e.message}`);
+    }
+  }
+
+  if (activatedRecords.length === 0) {
+    console.log('\n  无成功激活的记录，跳过等待');
+    return missingZones;
+  }
+
+  // 等待证书生效（轮询检测）
+  console.log(`\n── 等待 SSL 证书生效（最长 ${maxWaitSec}s）──`);
+  const startTime = Date.now();
+  const pollInterval = 15; // 每 15 秒检测一次
+  let allReady = false;
+
+  while ((Date.now() - startTime) < maxWaitSec * 1000) {
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    console.log(`  [${elapsed}s] 检测证书状态...`);
+
+    allReady = true;
+    for (const z of missingZones) {
+      const hasCert = await checkSslCert(z.testFqdn);
+      if (!hasCert) {
+        allReady = false;
+        console.log(`    ✗ ${z.zoneName} — 证书尚未生效`);
+      } else {
+        console.log(`    ✓ ${z.zoneName} — 证书已生效`);
+      }
+    }
+
+    if (allReady) break;
+    await new Promise(r => setTimeout(r, pollInterval * 1000));
+  }
+
+  if (!allReady) {
+    console.log(`\n  ⚠  超时，部分 Zone 证书仍未生效（CF 签发可能需要数小时）`);
+  } else {
+    console.log('\n  ✓ 所有 Zone 的 SSL 证书已生效');
+  }
+
+  // 切回 proxied=false
+  console.log('\n── 切回 proxied=false ──');
+  for (const rec of activatedRecords) {
+    if (rec.wasProxied) {
+      console.log(`  ⊘ ${rec.zoneName} — 原本就是 proxied=true，保持不变`);
+      continue;
+    }
+    try {
+      // 只切回我们临时修改的那条记录（用完整 FQDN 查询）
+      const fqdn = rec.testFqdn;
+      const records = await sc.getDnsRecords(rec.zoneId, fqdn, rec.tokenKey);
+      const proxiedRec = records.find(r => r.type === 'A' && r.proxied);
+      if (proxiedRec) {
+        await sc.cfFetch(`/zones/${rec.zoneId}/dns_records/${proxiedRec.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ type: 'A', name: proxiedRec.name, content: proxiedRec.content, proxied: false, ttl: 1 }),
+          tokenKey: rec.tokenKey,
+        });
+        console.log(`  ✓ ${fqdn} → proxied=false（恢复）`);
+      } else {
+        console.log(`  ⊘ ${fqdn} — 无 proxied=true 的 A 记录，跳过`);
+      }
+    } catch (e) {
+      console.log(`  ✗ ${rec.zoneName} 切回失败: ${e.message}`);
+    }
+  }
+
+  // 最终验证
+  const stillMissing = [];
+  for (const z of missingZones) {
+    const hasCert = await checkSslCert(z.testFqdn);
+    if (!hasCert) {
+      stillMissing.push(z.zoneName);
+    }
+  }
+
+  if (stillMissing.length > 0) {
+    console.log(`\n  ⚠  以下 Zone 证书仍未生效: ${stillMissing.join(', ')}`);
+    console.log('    CF 证书签发可能需要数小时，下次 cron 运行时会自动重试');
+  } else {
+    console.log('\n  ✓ 证书激活完成，所有 Zone 均已生效');
+  }
+
+  return stillMissing;
+}
+
 // ── 连通性检测 ──────────────────────────────────────────
 
 const CHECK_TIMEOUT = 8000;
@@ -891,14 +1082,13 @@ async function main() {
   console.log(`  创建: ${syncStats.created}  删除: ${syncStats.deleted}  跳过: ${syncStats.skipped}  错误: ${syncStats.errors}`);
 
   // ═══════════════════════════════════════════════════
-  // 第四步：检验 DNS（连通性检测）
+  // 第三步半：SSL 证书激活
+  // proxied=false 的 A 记录不会触发 CF 签发 Universal SSL 证书，
+  // 导致 TLS 握手被 RST。此步骤临时 proxied=true 触发签发，
+  // 证书生效后切回 proxied=false。
   // ═══════════════════════════════════════════════════
 
-  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  第四步：检验 DNS（连通性检测）');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-  // 构建 FQDN 列表
+  // 构建 FQDN 列表（连通性检测也需要，提前构建）
   const fqdnList = [];
   for (const zone of filteredZones) {
     for (const prefix of zone.names) {
@@ -911,6 +1101,21 @@ async function main() {
       });
     }
   }
+
+  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  SSL 证书激活（检测 + 自动签发）');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  const missingZones = await ensureSslCerts(fqdnList);
+
+  // ═══════════════════════════════════════════════════
+  // 第四步：检验 DNS（连通性检测）
+  // ═══════════════════════════════════════════════════
+
+  console.log('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  第四步：检验 DNS（连通性检测）');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
   console.log(`  共 ${fqdnList.length} 个 FQDN\n`);
 
   // DNS 记录现状
