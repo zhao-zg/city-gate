@@ -26,6 +26,9 @@
  *   SPEED_TEST_MODE（可选）— fast=达标即停 / best=全部测完选最优（默认 fast）
  *   MAX_SPEED_TEST_COUNT（可选）— best 模式下最大测速 IP 数（默认 20）
  *   SPEED_TEST_HOST（可选）  — 测速域名（默认自动检测，需为 Worker 路由域名）
+ *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
+ *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 3，1=单次不取平均）
+ *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.3 = 30%）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *
  * 用法：
@@ -51,12 +54,21 @@ const SPEED_TEST_MODE = process.env.SPEED_TEST_MODE || 'fast';
 const MAX_SPEED_TEST_COUNT = parseInt(process.env.MAX_SPEED_TEST_COUNT || '20', 10);
 // 测速域名（需为已部署 Worker 的域名，默认自动检测）
 const SPEED_TEST_HOST = process.env.SPEED_TEST_HOST || '';
+// 数据中心过滤（逗号分隔，如 HKG,LAX），留空=不过滤
+const COLO_FILTER = process.env.COLO_FILTER
+  ? process.env.COLO_FILTER.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+  : [];
+// 延迟采样次数（默认 3，1=单次不取平均）
+const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '3', 10), 1), 10);
+// 丢包率上限，超过则过滤（默认 0.3 = 30%）
+const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.3');
 
 // ── IP 质量检测 ──────────────────────────────────────
 
 /**
  * 测量 TCP 握手延迟（ms）
  * 默认测 443 端口（与测速端口一致），确保延迟达标的 IP 也能正常测速
+ * 返回 null 表示连接失败
  */
 function measureLatency(ip, port = 443) {
   return new Promise((resolve) => {
@@ -85,6 +97,27 @@ function measureLatency(ip, port = 443) {
 }
 
 /**
+ * 多次采样测量延迟，取平均值
+ * 返回 { avgLatency, samples, successCount, totalCount }
+ *   avgLatency  — 平均延迟（ms），null 表示全部失败
+ *   samples    — 各次结果数组（null = 失败，数字 = 延迟ms）
+ *   successCount — 成功次数
+ *   totalCount   — 总采样次数
+ */
+async function measureLatencyMulti(ip, samples, port = 443) {
+  const results = [];
+  for (let i = 0; i < samples; i++) {
+    const latency = await measureLatency(ip, port);
+    results.push(latency);
+  }
+  const successCount = results.filter(r => r !== null).length;
+  const avgLatency = successCount > 0
+    ? Math.round(results.reduce((sum, r) => sum + (r || 0), 0) / successCount)
+    : null;
+  return { avgLatency, samples: results, successCount, totalCount: samples };
+}
+
+/**
  * 提取 IP 的 /N 前缀（用于去重）
  * 如 172.64.152.241 + /24 → "172.64.152"
  */
@@ -104,13 +137,14 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
   }
   const byPrefix = new Map();
 
-  for (const { ip, latency } of ipLatencyList) {
+  for (const item of ipLatencyList) {
+    const { ip, latency } = item;
     // /32 时直接用完整 IP 做 key，跳过 ipPrefix 调用
     const prefix = prefixLen === 32 ? ip : ipPrefix(ip, prefixLen);
     const existing = byPrefix.get(prefix);
 
     if (!existing || latency < existing.latency) {
-      byPrefix.set(prefix, { ip, latency });
+      byPrefix.set(prefix, item);
     }
   }
 
@@ -404,7 +438,8 @@ async function buildIpPool(testHost, needCount) {
   }
 
   // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 10 个并发，避免触发 CF 限速）
-  console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个）...`);
+  const coloDesc = COLO_FILTER.length > 0 ? `，colo 过滤: ${COLO_FILTER.join(',')}` : '';
+  console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个，采样 ${LATENCY_SAMPLES} 次${coloDesc}）...`);
 
   async function checkIpBatch(ipSet) {
     const ipList = [...ipSet];
@@ -416,14 +451,15 @@ async function buildIpPool(testHost, needCount) {
       const batchResults = await Promise.all(
         batch.map(async (ip) => {
           const check = await sc.testIp1034(ip, testHost);
+          const colo = check.colo || null;
           if (!check.ok) {
-            return { ip, ok: false, reason: check.reason, latency: null };
+            return { ip, ok: false, reason: check.reason, latency: null, colo, samples: [], successCount: 0, totalCount: 0 };
           }
-          const latency = await measureLatency(ip);
-          if (latency === null) {
-            return { ip, ok: false, reason: 'TCP 连接失败', latency: null };
+          const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES);
+          if (avgLatency === null) {
+            return { ip, ok: false, reason: 'TCP 连接失败', latency: null, colo, samples, successCount, totalCount };
           }
-          return { ip, ok: true, reason: check.reason, latency };
+          return { ip, ok: true, reason: check.reason, latency: avgLatency, colo, samples, successCount, totalCount };
         })
       );
       allResults.push(...batchResults);
@@ -432,9 +468,48 @@ async function buildIpPool(testHost, needCount) {
     return allResults;
   }
 
+  // 打印单个 IP 检测结果
+  function printIpResult(r, extra) {
+    const status = r.ok ? '✓' : '✗';
+    const sampleStr = r.ok && r.samples.length > 1
+      ? `${r.latency}ms (${r.samples.map(s => s === null ? '×' : s).join('/')})`
+      : r.ok ? `${r.latency}ms` : '';
+    const coloStr = r.colo ? r.colo : '';
+    const lossStr = r.ok && r.totalCount > 1 && r.successCount < r.totalCount
+      ? `${r.successCount}/${r.totalCount}` : '';
+    const parts = [
+      `  ${status}  ${r.ip.padEnd(18)}`,
+      sampleStr.padEnd(r.samples.length > 1 ? 24 : 8),
+    ];
+    if (lossStr) parts.push(lossStr.padEnd(6));
+    if (coloStr) parts.push(coloStr.padEnd(5));
+    parts.push(extra || (r.ok ? '' : '— ' + r.reason));
+    console.log(parts.join('  ').trimEnd());
+  }
+
   let results = await checkIpBatch(rawIps);
   let good = results.filter(r => r.ok);
   let bad = results.filter(r => !r.ok);
+
+  // colo 过滤
+  let filteredByColo = 0;
+  if (COLO_FILTER.length > 0) {
+    const before = good.length;
+    good = good.filter(r => r.colo && COLO_FILTER.includes(r.colo.toUpperCase()));
+    filteredByColo = before - good.length;
+  }
+
+  // 丢包率过滤
+  let filteredByLoss = 0;
+  if (LATENCY_SAMPLES > 1) {
+    const before = good.length;
+    good = good.filter(r => {
+      const lossRate = 1 - r.successCount / r.totalCount;
+      return lossRate <= MAX_PACKET_LOSS_RATE;
+    });
+    filteredByLoss = before - good.length;
+  }
+
   // 延迟上限过滤
   let filteredByLatency = 0;
   if (MAX_LATENCY_MS > 0) {
@@ -444,20 +519,36 @@ async function buildIpPool(testHost, needCount) {
   }
 
   for (const r of results) {
-    const status = r.ok ? '✓' : '✗';
-    const latencyStr = r.ok ? `${r.latency}ms` : '';
-    const filtered = r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS ? ' [超延迟] ' : '';
-    console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? filtered : '— ' + r.reason}`);
+    let extra = '';
+    if (r.ok && COLO_FILTER.length > 0 && r.colo && !COLO_FILTER.includes(r.colo.toUpperCase())) {
+      extra = `[colo ${r.colo} 不匹配]`;
+    } else if (r.ok && r.totalCount > 1 && r.successCount < r.totalCount) {
+      const lossRate = 1 - r.successCount / r.totalCount;
+      if (lossRate > MAX_PACKET_LOSS_RATE) {
+        extra = `[丢包率 ${(lossRate * 100).toFixed(0)}% > ${(MAX_PACKET_LOSS_RATE * 100).toFixed(0)}%]`;
+      }
+    } else if (r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS) {
+      extra = '[超延迟]';
+    }
+    printIpResult(r, extra);
   }
 
-  console.log(`\n  检测结果: 可用 ${good.length} / 不可用 ${bad.length}${filteredByLatency > 0 ? ` / 超延迟 ${filteredByLatency}` : ''}`);
+  const filterParts = [`不可用 ${bad.length}`];
+  if (filteredByColo > 0) filterParts.push(`colo 不匹配 ${filteredByColo}`);
+  if (filteredByLoss > 0) filterParts.push(`丢包率过高 ${filteredByLoss}`);
+  if (filteredByLatency > 0) filterParts.push(`超延迟 ${filteredByLatency}`);
+  console.log(`\n  检测结果: 可用 ${good.length} / ${filterParts.join(' / ')}`);
 
   // 第3步：按延迟排序（prefixLen=0 时不去重，保留全部）
   console.log(`\n  [3] ${dedupDesc}...`);
   let deduped = dedupIps(good);
   console.log(`  去重后: ${deduped.length} 个 IP（按延迟排序）`);
-  for (const { ip, latency } of deduped.slice(0, 20)) {
-    console.log(`    ${ip.padEnd(18)} ${latency}ms`);
+  for (const item of deduped.slice(0, 20)) {
+    const coloStr = item.colo ? ` ${item.colo}` : '';
+    const sampleStr = item.samples && item.samples.length > 1
+      ? ` (${item.samples.map(s => s === null ? '×' : s).join('/')})`
+      : '';
+    console.log(`    ${item.ip.padEnd(18)} ${item.latency}ms${sampleStr}${coloStr}`);
   }
   if (deduped.length > 20) {
     console.log(`    ... 共 ${deduped.length} 个`);
@@ -484,13 +575,32 @@ async function buildIpPool(testHost, needCount) {
       if (newIps.size > 0) {
         const newResults = await checkIpBatch(newIps);
         for (const r of newResults) {
-          const status = r.ok ? '✓' : '✗';
-          const latencyStr = r.ok ? `${r.latency}ms` : '';
-          const filtered = r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS ? ' [超延迟] ' : '';
-          console.log(`  ${status}  ${r.ip.padEnd(18)} ${latencyStr.padEnd(8)} ${r.ok ? filtered : '— ' + r.reason}`);
+          let extra = '';
+          if (r.ok && COLO_FILTER.length > 0 && r.colo && !COLO_FILTER.includes(r.colo.toUpperCase())) {
+            extra = `[colo ${r.colo} 不匹配]`;
+          } else if (r.ok && r.totalCount > 1 && r.successCount < r.totalCount) {
+            const lossRate = 1 - r.successCount / r.totalCount;
+            if (lossRate > MAX_PACKET_LOSS_RATE) {
+              extra = `[丢包率 ${(lossRate * 100).toFixed(0)}% > ${(MAX_PACKET_LOSS_RATE * 100).toFixed(0)}%]`;
+            }
+          } else if (r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS) {
+            extra = '[超延迟]';
+          }
+          printIpResult(r, extra);
         }
         let newGood = newResults.filter(r => r.ok);
-        // 补充 IP 也过滤延迟
+        // colo 过滤
+        if (COLO_FILTER.length > 0) {
+          newGood = newGood.filter(r => r.colo && COLO_FILTER.includes(r.colo.toUpperCase()));
+        }
+        // 丢包率过滤
+        if (LATENCY_SAMPLES > 1) {
+          newGood = newGood.filter(r => {
+            const lossRate = 1 - r.successCount / r.totalCount;
+            return lossRate <= MAX_PACKET_LOSS_RATE;
+          });
+        }
+        // 延迟过滤
         if (MAX_LATENCY_MS > 0) {
           newGood = newGood.filter(r => r.latency <= MAX_LATENCY_MS);
         }
@@ -822,10 +932,14 @@ async function main() {
 
   // fast 模式达标即停，best 模式测完上限数
   for (let i = 0; i < maxTestCount; i++) {
-    const { ip, latency } = ipPool[i];
+    const { ip, latency, colo } = ipPool[i];
     if (!isBestMode && speedResults.length >= needCount) break;
 
-    console.log(`  ▸ ${ip}（延迟 ${latency}ms）测速...`);
+    const coloStr = colo ? `[${colo}] ` : '';
+    const sampleStr = ipPool[i].samples && ipPool[i].samples.length > 1
+      ? ` (${ipPool[i].samples.map(s => s === null ? '×' : s).join('/')})`
+      : '';
+    console.log(`  ▸ ${ip}（延迟 ${latency}ms${sampleStr}）${coloStr}测速...`);
     const result = await testDownloadSpeed(ip, SPEED_TEST_SEC, speedHost);
     testedIps.add(ip);
 
@@ -833,7 +947,7 @@ async function main() {
       const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
       console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
       if (result.speed_kbps >= MIN_SPEED_KBPS) {
-        speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
+        speedResults.push({ ip, latency, colo, speed_kbps: result.speed_kbps });
       }
     } else {
       console.log(`    ✗ 测速失败`);
@@ -858,17 +972,37 @@ async function main() {
           // 先快速验证 1034
           const check = await sc.testIp1034(ip, testHost);
           if (!check.ok) { testedIps.add(ip); continue; }
-
-          const latency = await measureLatency(ip);
-          if (latency === null) { testedIps.add(ip); continue; }
-          // 延迟过滤
-          if (MAX_LATENCY_MS > 0 && latency > MAX_LATENCY_MS) {
-            console.log(`  ⊘ ${ip}（延迟 ${latency}ms > ${MAX_LATENCY_MS}ms，跳过）`);
+          const colo = check.colo || null;
+          // colo 过滤
+          if (COLO_FILTER.length > 0 && (!colo || !COLO_FILTER.includes(colo.toUpperCase()))) {
+            console.log(`  ⊘ ${ip}（colo ${colo || 'N/A'} 不匹配，跳过）`);
             testedIps.add(ip);
             continue;
           }
 
-          console.log(`  ▸ ${ip}（候选，延迟 ${latency}ms）测速...`);
+          const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES);
+          if (avgLatency === null) { testedIps.add(ip); continue; }
+          // 丢包率过滤
+          if (LATENCY_SAMPLES > 1) {
+            const lossRate = 1 - successCount / totalCount;
+            if (lossRate > MAX_PACKET_LOSS_RATE) {
+              console.log(`  ⊘ ${ip}（丢包率 ${(lossRate * 100).toFixed(0)}% > ${(MAX_PACKET_LOSS_RATE * 100).toFixed(0)}%，跳过）`);
+              testedIps.add(ip);
+              continue;
+            }
+          }
+          // 延迟过滤
+          if (MAX_LATENCY_MS > 0 && avgLatency > MAX_LATENCY_MS) {
+            console.log(`  ⊘ ${ip}（延迟 ${avgLatency}ms > ${MAX_LATENCY_MS}ms，跳过）`);
+            testedIps.add(ip);
+            continue;
+          }
+
+          const coloStr = colo ? `[${colo}] ` : '';
+          const sampleStr = samples.length > 1
+            ? ` (${samples.map(s => s === null ? '×' : s).join('/')})`
+            : '';
+          console.log(`  ▸ ${ip}（候选，延迟 ${avgLatency}ms${sampleStr}）${coloStr}测速...`);
           const result = await testDownloadSpeed(ip, SPEED_TEST_SEC, speedHost);
           testedIps.add(ip);
 
@@ -876,7 +1010,7 @@ async function main() {
             const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
             console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
             if (result.speed_kbps >= MIN_SPEED_KBPS) {
-              speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
+              speedResults.push({ ip, latency: avgLatency, colo, speed_kbps: result.speed_kbps });
             }
           } else {
             console.log(`    ✗ 测速失败`);
@@ -909,7 +1043,8 @@ async function main() {
   // 测速结果一览
   console.log('\n  测速达标 IP:');
   for (const r of speedResults) {
-    console.log(`    ✓ ${r.ip.padEnd(18)} ${r.speed_kbps} KB/s  (${r.latency}ms)`);
+    const coloStr = r.colo ? `[${r.colo}] ` : '';
+    console.log(`    ✓ ${r.ip.padEnd(18)} ${r.speed_kbps} KB/s  (${r.latency}ms) ${coloStr}`);
   }
 
   // ═══════════════════════════════════════════════════
@@ -920,7 +1055,7 @@ async function main() {
   console.log('  第三步：同步 DNS（分配 + 写入 A 记录）');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  const finalPool = speedResults.map(r => ({ ip: r.ip, latency: r.latency }));
+  const finalPool = speedResults.map(r => ({ ip: r.ip, latency: r.latency, colo: r.colo || null, samples: r.samples || null, successCount: r.successCount || 0, totalCount: r.totalCount || 0 }));
   console.log('\n── Zone IP 分配 ──');
   const assignments = assignIpsToZones(filteredZones, finalPool, IP_PER_ZONE);
   printAssignmentPlan(assignments);
@@ -1058,6 +1193,7 @@ if (require.main === module) {
 // ── 导出 ──
 module.exports = {
   measureLatency,
+  measureLatencyMulti,
   ipPrefix,
   dedupIps,
   checkConnectivity,

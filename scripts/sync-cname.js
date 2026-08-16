@@ -422,6 +422,17 @@ function testIp1034Once(ip, testHost) {
     let settled = false;
     const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
     let body = '';
+    let colo = null;
+
+    // 从 cf-ray 响应头提取数据中心代码（格式: {hex}-{COLO}）
+    function extractColo(res) {
+      if (colo) return;
+      const cfRay = res.headers['cf-ray'];
+      if (cfRay) {
+        const parts = String(cfRay).split('-');
+        if (parts.length >= 2) colo = parts[parts.length - 1];
+      }
+    }
 
     const req = https.request({
       host: ip,
@@ -432,42 +443,43 @@ function testIp1034Once(ip, testHost) {
       timeout: POOL_CHECK_TIMEOUT,
       rejectUnauthorized: false,  // 忽略证书不匹配（不影响可用性判定）
     }, (res) => {
+      extractColo(res);
       res.on('data', (chunk) => {
         body += chunk;
         if (body.length >= 8192) {
           // 1034 错误页和挑战页远小于 8KB，到这里还没出现说明正常
           res.destroy();
-          finish({ ok: true, reason: `HTTP ${res.statusCode}` });
+          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo });
         } else if (/error code:\s*1034|error 1034/i.test(body)) {
           res.destroy();
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034` });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo });
         } else if (isChallengePage(res.statusCode, body)) {
           res.destroy();
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）` });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo });
         }
       });
       res.on('end', () => {
         if (/error code:\s*1034|error 1034/i.test(body)) {
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034` });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo });
         } else if (isChallengePage(res.statusCode, body)) {
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）` });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo });
         } else {
-          finish({ ok: true, reason: `HTTP ${res.statusCode}` });
+          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo });
         }
       });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      finish({ ok: false, reason: '连接超时' });
+      finish({ ok: false, reason: '连接超时', colo: null });
     });
     req.on('error', (e) => {
       const msg = e.code || e.message || '';
       // 证书类错误说明 TLS 已通到 CF 边缘，CNAME 层面仍有效
       if (/CERT|TLS|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(String(msg))) {
-        finish({ ok: true, reason: 'TLS 证书不匹配（网络已通）' });
+        finish({ ok: true, reason: 'TLS 证书不匹配（网络已通）', colo });
       } else {
-        finish({ ok: false, reason: `连接失败: ${String(msg).slice(0, 40)}` });
+        finish({ ok: false, reason: `连接失败: ${String(msg).slice(0, 40)}`, colo: null });
       }
     });
 
