@@ -422,7 +422,14 @@ function testIp1034Once(ip, testHost) {
     const start = Date.now();
     let settled = false;
     let connectLatency = null;  // TLS 握手延迟（ms），供延迟采样复用
-    const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
+    let activeRes = null;        // 当前响应对象，finish 时销毁
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      if (activeRes) { try { activeRes.destroy(); } catch (_) {} }
+      req.destroy();
+      resolve(r);
+    };
     let body = '';
     let colo = null;
 
@@ -445,18 +452,16 @@ function testIp1034Once(ip, testHost) {
       timeout: POOL_CHECK_TIMEOUT,
       rejectUnauthorized: false,  // 忽略证书不匹配（不影响可用性判定）
     }, (res) => {
+      activeRes = res;
       extractColo(res);
       res.on('data', (chunk) => {
         body += chunk;
         if (body.length >= 8192) {
           // 1034 错误页和挑战页远小于 8KB，到这里还没出现说明正常
-          res.destroy();
           finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo, connectLatency });
         } else if (/error code:\s*1034|error 1034/i.test(body)) {
-          res.destroy();
           finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo, connectLatency });
         } else if (isChallengePage(res.statusCode, body)) {
-          res.destroy();
           finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo, connectLatency });
         }
       });
