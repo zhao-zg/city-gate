@@ -508,6 +508,8 @@ async function buildIpPool(testHost, needCount) {
     const ipList = [...ipSet];
     const BATCH_SIZE = 10;
     const allResults = [];
+    const total = ipList.length;
+    let done = 0;
 
     for (let i = 0; i < ipList.length; i += BATCH_SIZE) {
       const batch = ipList.slice(i, i + BATCH_SIZE);
@@ -526,6 +528,13 @@ async function buildIpPool(testHost, needCount) {
         })
       );
       allResults.push(...batchResults);
+      done += batchResults.length;
+
+      // 逐批打印进度 + 当前批次结果
+      console.log(`  ── 进度 ${done}/${total} ──`);
+      for (const r of batchResults) {
+        printIpResult(r);
+      }
     }
 
     return allResults;
@@ -593,7 +602,7 @@ async function buildIpPool(testHost, needCount) {
     } else if (r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS) {
       extra = '[超延迟]';
     }
-    printIpResult(r, extra);
+    if (extra) printIpResult(r, extra);
   }
 
   const filterParts = [`不可用 ${bad.length}`];
@@ -637,6 +646,7 @@ async function buildIpPool(testHost, needCount) {
 
       if (newIps.size > 0) {
         const newResults = await checkIpBatch(newIps);
+        // 补充批次只打印被过滤的 IP（正常 IP 已在 checkIpBatch 内打印）
         for (const r of newResults) {
           let extra = '';
           if (r.ok && COLO_FILTER.length > 0 && r.colo && !COLO_FILTER.includes(r.colo.toUpperCase())) {
@@ -649,7 +659,7 @@ async function buildIpPool(testHost, needCount) {
           } else if (r.ok && MAX_LATENCY_MS > 0 && r.latency > MAX_LATENCY_MS) {
             extra = '[超延迟]';
           }
-          printIpResult(r, extra);
+          if (extra) printIpResult(r, extra);
         }
         let newGood = newResults.filter(r => r.ok);
         // colo 过滤
