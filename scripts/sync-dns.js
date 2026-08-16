@@ -137,34 +137,23 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 function testDownloadSpeed(ip, testSec, speedHost) {
   // 每次请求下载 10MB 随机数据
   const CHUNK_BYTES = 10 * 1024 * 1024;
-  // 测速并发数
-  const CONCURRENCY = 2;
   // 测速端口（443 = HTTPS，通过 Worker 代理不经过 WAF）
   const SPEED_PORT = 443;
-  // 连续失败 5 次直接终止测速
-  const MAX_CONSECUTIVE_FAILURES = 5;
 
   return new Promise((resolve) => {
     const start = Date.now();
-    const durationMs = testSec * 1000;
     const timeoutMs = (testSec + 5) * 1000; // 硬超时 = 测速时长 + 5s 余量
     let settled = false;
     let totalDownloaded = 0;
-    let downloadedAtCutoff = 0; // 测速到点时的下载量（用于精确计算速度）
-    let requestCount = 0;
-    let activeRequests = 0;
-    let consecutiveFailures = 0;
     const pendingTimers = new Set();
 
     // keep-alive agent 复用 TCP 连接
     const agent = new https.Agent({
       keepAlive: true,
-      maxSockets: CONCURRENCY,
       rejectUnauthorized: false,
     });
 
     const cleanup = () => {
-      // 清除所有 pending timers，避免 setTimeout 堆积
       for (const t of pendingTimers) clearTimeout(t);
       pendingTimers.clear();
       agent.destroy();
@@ -174,110 +163,40 @@ function testDownloadSpeed(ip, testSec, speedHost) {
       if (settled) return;
       settled = true;
       cleanup();
-      // 用测速时长（非含缓冲期的实际经过时间）计算速度，避免低估
-      const effectiveSec = Math.max(durationMs / 1000, 0.001);
-      const effectiveDownloaded = downloadedAtCutoff || totalDownloaded;
-      const speed_kbps = Math.round((effectiveDownloaded / 1024) / effectiveSec);
-      resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start, requests: requestCount });
+      const elapsedSec = Math.max((Date.now() - start) / 1000, 0.001);
+      const speed_kbps = Math.round((totalDownloaded / 1024) / elapsedSec);
+      resolve({ speed_kbps, downloaded: totalDownloaded, duration_ms: Date.now() - start });
     };
 
-    function scheduleNext(delay) {
-      if (settled) return;
-      const timer = setTimeout(() => {
-        pendingTimers.delete(timer);
-        makeRequest();
-      }, delay);
-      pendingTimers.add(timer);
-    }
-
-    // 测速时长到点：记录截止下载量，给在途请求 500ms 缓冲收尾
-    const testTimer = setTimeout(() => {
-      downloadedAtCutoff = totalDownloaded;
-      const bufferTimer = setTimeout(finish, 500);
-      pendingTimers.add(bufferTimer);
-    }, durationMs);
-    pendingTimers.add(testTimer);
-
+    // 硬超时保底
     const hardTimer = setTimeout(finish, timeoutMs);
     pendingTimers.add(hardTimer);
 
-    function makeRequest() {
-      if (settled) return;
-      if (Date.now() - start >= durationMs) {
-        if (activeRequests === 0) finish();
+    const req = https.request({
+      host: ip,
+      port: SPEED_PORT,
+      headers: { Host: speedHost },
+      path: `/__down?bytes=${CHUNK_BYTES}`,
+      method: 'GET',
+      timeout: timeoutMs,
+      agent,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        finish();
         return;
       }
-
-      activeRequests++;
-      requestCount++;
-
-      const req = https.request({
-        host: ip,
-        port: SPEED_PORT,
-        headers: { Host: speedHost },
-        path: `/__down?bytes=${CHUNK_BYTES}`,
-        method: 'GET',
-        timeout: timeoutMs,
-        agent,
-        rejectUnauthorized: false,
-      }, (res) => {
-        // 非 200 响应：等流结束再递减 activeRequests，避免竞态
-        if (res.statusCode !== 200) {
-          let decremented = false;
-          res.on('end', () => {
-            if (decremented) return;
-            decremented = true;
-            activeRequests--;
-            consecutiveFailures++;
-            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-              finish();
-              return;
-            }
-            if (!settled) scheduleNext(100);
-          });
-          res.on('error', () => {
-            if (decremented) return;
-            decremented = true;
-            activeRequests--;
-            if (!settled) scheduleNext(100);
-          });
-          res.resume();
-          return;
-        }
-
-        // 200 响应：重置连续失败计数
-        consecutiveFailures = 0;
-
-        res.on('data', (chunk) => {
-          if (!settled) totalDownloaded += chunk.length;
-        });
-        res.on('end', () => {
-          activeRequests--;
-          if (!settled) makeRequest(); // 10MB 下载完，继续发新请求
-        });
-        res.on('error', () => {
-          activeRequests--;
-          if (!settled) makeRequest();
-        });
+      res.on('data', (chunk) => {
+        if (!settled) totalDownloaded += chunk.length;
       });
+      res.on('end', () => { if (!settled) finish(); });
+      res.on('error', () => { if (!settled) finish(); });
+    });
 
-      req.on('timeout', () => { req.destroy(); });
-      req.on('error', () => {
-        activeRequests--;
-        consecutiveFailures++;
-        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          finish();
-          return;
-        }
-        if (!settled) scheduleNext(100);
-      });
-      req.end();
-    }
-
-    // 并发请求
-    for (let i = 0; i < CONCURRENCY; i++) {
-      makeRequest();
-    }
+    req.on('timeout', () => { req.destroy(); });
+    req.on('error', () => { if (!settled) finish(); });
+    req.end();
   });
 }
 
@@ -912,7 +831,7 @@ async function main() {
 
     if (result) {
       const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-      console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms / ${result.requests} 请求）`);
+      console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
       if (result.speed_kbps >= MIN_SPEED_KBPS) {
         speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
       }
@@ -955,7 +874,7 @@ async function main() {
 
           if (result) {
             const mark = result.speed_kbps >= MIN_SPEED_KBPS ? '✓' : '✗';
-            console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.requests} 请求）`);
+            console.log(`    ${mark} ${result.speed_kbps} KB/s（${(result.downloaded / 1024).toFixed(0)} KB / ${result.duration_ms}ms）`);
             if (result.speed_kbps >= MIN_SPEED_KBPS) {
               speedResults.push({ ip, latency, speed_kbps: result.speed_kbps });
             }
