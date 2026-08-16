@@ -68,6 +68,8 @@ const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.1
 const IP_SOURCE = process.env.IP_SOURCE || 'domain';
 // 每个 CIDR 最多采样 IP 数
 const CIDR_SAMPLES = parseInt(process.env.CIDR_SAMPLES || '100', 10);
+// cfIpTop20 补充开关（默认关闭，设为 1 开启）
+const ENABLE_CF_TOP20 = process.env.ENABLE_CF_TOP20 === '1';
 
 // ── IP 质量检测 ──────────────────────────────────────
 
@@ -645,8 +647,8 @@ async function buildIpPool(testHost, needCount) {
     console.log(`    ... 共 ${deduped.length} 个`);
   }
 
-  // 第4步：去重后数量不足时才从 cfIpTop20 补充
-  if (deduped.length < needCount) {
+  // 第4步：去重后数量不足且开启 cfIpTop20 补充时才拉取
+  if (deduped.length < needCount && ENABLE_CF_TOP20) {
     console.log(`\n  [4] 池内仅 ${deduped.length} 个 IP，不足 ${needCount}，从 cfIpTop20 补充...`);
     try {
       const top20 = await sc.fetchCfTop20();
@@ -704,6 +706,8 @@ async function buildIpPool(testHost, needCount) {
     } catch (e) {
       console.log(`    cfIpTop20 拉取失败: ${e.message}，继续用现有 IP`);
     }
+  } else if (deduped.length < needCount && !ENABLE_CF_TOP20) {
+    console.log(`\n  [4] 池内仅 ${deduped.length} 个 IP，不足 ${needCount}（cfIpTop20 补充未开启）`);
   } else {
     console.log(`\n  [4] 池内 ${deduped.length} 个 IP >= 需求 ${needCount}，跳过 cfIpTop20`);
   }
@@ -1079,8 +1083,8 @@ async function main() {
 
   console.log(`\n  测速结果: ${speedResults.length}/${needCount} 达标`);
 
-  // 池内 IP 测完仍不足，从 cfIpTop20 补充候选再测速
-  if (speedResults.length < needCount) {
+  // 池内 IP 测完仍不足且开启 cfIpTop20 补充时才拉取
+  if (speedResults.length < needCount && ENABLE_CF_TOP20) {
     console.log(`\n  ⚠ 池内达标 IP 不足，从 cfIpTop20 补充候选...`);
     try {
       const top20 = await sc.fetchCfTop20();
@@ -1144,6 +1148,8 @@ async function main() {
     } catch (e) {
       console.log(`  cfIpTop20 拉取失败: ${e.message}，用现有达标 IP 继续`);
     }
+  } else if (speedResults.length < needCount && !ENABLE_CF_TOP20) {
+    console.log(`\n  ⚠ 池内达标 IP 不足（${speedResults.length}/${needCount}），cfIpTop20 补充未开启`);
   }
 
   } // end else (非 off 模式的测速逻辑)

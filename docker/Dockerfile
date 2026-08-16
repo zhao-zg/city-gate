@@ -53,5 +53,7 @@ ENV IP_SOURCE="domain"
 ENV CIDR_SAMPLES="100"
 # Zone 配置覆盖（留空=使用镜像内 wrangler.toml，设为 JSON 字符串=环境变量覆盖）
 ENV ZONE_CONFIG_JSON=""
+# cfIpTop20 补充开关（默认关闭，设为 1 开启）
+ENV ENABLE_CF_TOP20=""
 
 ENTRYPOINT ["/entrypoint.sh"]
