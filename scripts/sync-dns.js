@@ -400,20 +400,41 @@ const CHECK_TIMEOUT = 8000;
 
 /**
  * 检测 FQDN 连通性：HTTPS 请求到 FQDN，检查响应状态
+ * 
+ * 关键：必须通过 ip 参数直连已验证的 IP，而非让 Node.js 走系统 DNS 解析。
+ * 原因：proxied=false 的 A 记录不触发 CF 签发 Universal SSL 证书，
+ * 若 SNI=fqdn 但 CF 边缘没有该域证书，会直接 RST（ECONNRESET）；
+ * 而 1034 检测用 testHost 做 SNI（已有证书），所以能通过。
+ * 直连 IP + SNI=fqdn 可以准确检测"该 IP 在 CF 边缘是否为该 fqdn 正常服务"，
+ * 同时避免系统 DNS 解析到不可控 IP 的问题。
+ * 
+ * @param {string} fqdn - 待检测的域名
+ * @param {string|null} ip - 该 FQDN 的 A 记录 IP（直连，绕过系统 DNS）；null 则回退到系统 DNS
  */
-function checkConnectivity(fqdn) {
+function checkConnectivity(fqdn, ip) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
 
-    const req = https.request({
-      hostname: fqdn,
+    const options = {
       path: '/',
       method: 'GET',
       timeout: CHECK_TIMEOUT,
       rejectUnauthorized: false,
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' },
-    }, (res) => {
+    };
+
+    if (ip) {
+      // 直连已验证的 IP，SNI=fqdn，Host=fqdn
+      options.host = ip;
+      options.servername = fqdn;
+      options.headers.Host = fqdn;
+    } else {
+      // 无 IP 时回退到系统 DNS 解析（兼容旧调用方式）
+      options.hostname = fqdn;
+    }
+
+    const req = https.request(options, (res) => {
       let body = '';
       res.on('data', (chunk) => {
         body += chunk;
@@ -436,7 +457,15 @@ function checkConnectivity(fqdn) {
     });
 
     req.on('timeout', () => { req.destroy(); finish({ ok: false, reason: '请求超时' }); });
-    req.on('error', (e) => { finish({ ok: false, reason: `连接失败: ${e.message.slice(0, 60)}` }); });
+    req.on('error', (e) => {
+      // ECONNRESET 通常是 CF 边缘无该域名证书直接 RST，给出明确提示
+      const msg = e.message || '';
+      if (/ECONNRESET/i.test(msg)) {
+        finish({ ok: false, reason: `ECONNRESET（CF 边缘无 ${fqdn} 证书，SNI 被 RST）` });
+      } else {
+        finish({ ok: false, reason: `连接失败: ${msg.slice(0, 60)}` });
+      }
+    });
     req.end();
   });
 }
@@ -1234,7 +1263,7 @@ async function main() {
 
   console.log(`  共 ${fqdnList.length} 个 FQDN\n`);
 
-  // DNS 记录现状
+  // DNS 记录现状 + 收集 A 记录 IP（供连通性检测直连用）
   console.log('── DNS 记录现状 ──');
   const zoneGroups = {};
   for (const f of fqdnList) {
@@ -1263,6 +1292,11 @@ async function main() {
           for (const rec of records) {
             console.log(`    ${f.fqdn}: ${rec.type} → ${rec.content} (proxied=${rec.proxied})`);
           }
+          // 收集 proxied=false 的 A 记录 IP，供连通性检测直连
+          const aIps = records
+            .filter(r => r.type === 'A' && !r.proxied)
+            .map(r => r.content);
+          if (aIps.length > 0) f.aRecordIps = aIps;
         }
       } catch (e) {
         console.error(`    ✗ ${f.fqdn} 查询失败: ${e.message}`);
@@ -1280,8 +1314,15 @@ async function main() {
       continue;
     }
 
-    console.log(`  ▸ 检测 ${f.fqdn}...`);
-    const r = await checkConnectivity(f.fqdn);
+    // 取第一个 A 记录 IP 直连，避免系统 DNS 解析到不可控 IP；
+    // 同时 SNI=fqdn 可准确检测 CF 边缘是否有该域名证书（无证书会 RST）
+    const checkIp = f.aRecordIps && f.aRecordIps[0] ? f.aRecordIps[0] : null;
+    if (checkIp) {
+      console.log(`  ▸ 检测 ${f.fqdn} (→ ${checkIp})...`);
+    } else {
+      console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS)...`);
+    }
+    const r = await checkConnectivity(f.fqdn, checkIp);
     checkResults.push({ fqdn: f.fqdn, ...r });
     const mark = r.ok ? '✓' : '✗';
     console.log(`    ${mark} ${r.reason}`);
