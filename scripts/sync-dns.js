@@ -512,7 +512,7 @@ async function buildIpPool(testHost, needCount) {
 
   async function checkIpBatch(ipSet) {
     const ipList = [...ipSet];
-    const CONCURRENCY = 20;        // 固定并发数
+    const CONCURRENCY = 10;        // 固定并发数
     const total = ipList.length;
     const allResults = [];
     let done = 0;
