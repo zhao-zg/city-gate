@@ -303,9 +303,9 @@ const CF_PUBLIC_RESERVED_IPS = [
 ];
 
 // ── 优选域名有效性检测 ─────────────────────────────────────
-const POOL_CHECK_TIMEOUT = 4000;   // 单次请求超时（ms）
+const POOL_CHECK_TIMEOUT = 3000;   // 单次请求超时（ms）
 const POOL_RESOLVE_ROUNDS = 3;     // 每个域名 DNS 解析轮数（收集轮询 IP）
-const POOL_IP_RETRIES = 3;         // 软错误（超时/连接失败）重试次数，消除抖动
+const POOL_IP_RETRIES = 2;         // 软错误（超时/连接失败）重试次数，消除抖动
 
 /**
  * 快速短路：是否为已知 CF 公共保留 IP（1.1.1.1 等，官方确认必触发 1034）
@@ -419,7 +419,9 @@ function isChallengePage(statusCode, body) {
  */
 function testIp1034Once(ip, testHost) {
   return new Promise((resolve) => {
+    const start = Date.now();
     let settled = false;
+    let connectLatency = null;  // TLS 握手延迟（ms），供延迟采样复用
     const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
     let body = '';
     let colo = null;
@@ -449,37 +451,44 @@ function testIp1034Once(ip, testHost) {
         if (body.length >= 8192) {
           // 1034 错误页和挑战页远小于 8KB，到这里还没出现说明正常
           res.destroy();
-          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo });
+          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo, connectLatency });
         } else if (/error code:\s*1034|error 1034/i.test(body)) {
           res.destroy();
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo, connectLatency });
         } else if (isChallengePage(res.statusCode, body)) {
           res.destroy();
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo, connectLatency });
         }
       });
       res.on('end', () => {
         if (/error code:\s*1034|error 1034/i.test(body)) {
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 1034`, colo, connectLatency });
         } else if (isChallengePage(res.statusCode, body)) {
-          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo });
+          finish({ ok: false, reason: `HTTP ${res.statusCode} 挑战页（验证码）`, colo, connectLatency });
         } else {
-          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo });
+          finish({ ok: true, reason: `HTTP ${res.statusCode}`, colo, connectLatency });
         }
+      });
+    });
+
+    // 记录 TLS 握手延迟，供调用方复用为第一次延迟采样
+    req.on('socket', (socket) => {
+      socket.on('secureConnect', () => {
+        connectLatency = Date.now() - start;
       });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      finish({ ok: false, reason: '连接超时', colo: null });
+      finish({ ok: false, reason: '连接超时', colo: null, connectLatency: null });
     });
     req.on('error', (e) => {
       const msg = e.code || e.message || '';
       // 证书类错误说明 TLS 已通到 CF 边缘，CNAME 层面仍有效
       if (/CERT|TLS|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(String(msg))) {
-        finish({ ok: true, reason: 'TLS 证书不匹配（网络已通）', colo });
+        finish({ ok: true, reason: 'TLS 证书不匹配（网络已通）', colo, connectLatency });
       } else {
-        finish({ ok: false, reason: `连接失败: ${String(msg).slice(0, 40)}`, colo: null });
+        finish({ ok: false, reason: `连接失败: ${String(msg).slice(0, 40)}`, colo: null, connectLatency: null });
       }
     });
 

@@ -80,7 +80,7 @@ function measureLatency(ip, port = 443) {
   return new Promise((resolve) => {
     const start = Date.now();
     const socket = new net.Socket();
-    socket.setTimeout(4000);
+    socket.setTimeout(3000);
 
     socket.on('connect', () => {
       const latency = Date.now() - start;
@@ -104,15 +104,21 @@ function measureLatency(ip, port = 443) {
 
 /**
  * 多次采样测量延迟，取平均值
+ * 参数 firstLatency：若传入非 null，作为第一次采样结果（复用 1034 检测的 TLS 握手延迟，省一次 TCP 连接）
  * 返回 { avgLatency, samples, successCount, totalCount }
  *   avgLatency  — 平均延迟（ms），null 表示全部失败
  *   samples    — 各次结果数组（null = 失败，数字 = 延迟ms）
  *   successCount — 成功次数
  *   totalCount   — 总采样次数
  */
-async function measureLatencyMulti(ip, samples, port = 443) {
+async function measureLatencyMulti(ip, samples, port = 443, firstLatency = null) {
   const results = [];
-  for (let i = 0; i < samples; i++) {
+  // 复用 1034 检测时的 TLS 握手延迟作为第一次采样
+  if (firstLatency !== null && samples > 0) {
+    results.push(firstLatency);
+  }
+  const remaining = samples - results.length;
+  for (let i = 0; i < remaining; i++) {
     const latency = await measureLatency(ip, port);
     results.push(latency);
   }
@@ -289,7 +295,7 @@ const SSL_KEEPALIVE_NAME = '_ssl';
  *
  * 原理：proxied=false 的 A 记录不会触发 CF 签发 SSL 证书，
  * Zone 内至少需要一条 proxied=true 记录才能维持证书。
- * _ssl.{zone} 指向 1.1.1.1（CF 不访问源站，仅作证书保底），
+ * _ssl.{zone} 指向 192.0.2.1（文档保留 IP，CF 允许 proxied 记录指向它），
  * proxied=true 且不占业务流量。
  *
  * @param {Array} fqdnList - FQDN 列表
@@ -500,13 +506,13 @@ async function buildIpPool(testHost, needCount) {
     throw new Error('未能收集到任何候选 IP！');
   }
 
-  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 10 个并发，避免触发 CF 限速）
+  // 第2步：逐 IP 验证 1034 + 挑战页 + 延迟（每批 20 个并发，避免触发 CF 限速）
   const coloDesc = COLO_FILTER.length > 0 ? `，colo 过滤: ${COLO_FILTER.join(',')}` : '';
   console.log(`\n  [2] 逐 IP 质量检测（${rawIps.size} 个，采样 ${LATENCY_SAMPLES} 次${coloDesc}）...`);
 
   async function checkIpBatch(ipSet) {
     const ipList = [...ipSet];
-    const BATCH_SIZE = 10;
+    const BATCH_SIZE = 20;
     const allResults = [];
     const total = ipList.length;
     let done = 0;
@@ -520,7 +526,9 @@ async function buildIpPool(testHost, needCount) {
           if (!check.ok) {
             return { ip, ok: false, reason: check.reason, latency: null, colo, samples: [], successCount: 0, totalCount: 0 };
           }
-          const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES);
+          // 复用 1034 检测的 TLS 握手延迟作为第一次采样，省一次 TCP 连接
+          const firstLatency = check.connectLatency || null;
+          const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES, 443, firstLatency);
           if (avgLatency === null) {
             return { ip, ok: false, reason: 'TCP 连接失败', latency: null, colo, samples, successCount, totalCount };
           }
