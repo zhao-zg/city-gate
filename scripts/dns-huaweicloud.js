@@ -73,6 +73,26 @@ function uriEncode(str) {
 }
 
 /**
+ * 规范化 API 路径
+ *
+ * 华为云服务端会对 collection 端点自动添加尾部斜杠（如 /v2/zones → /v2/zones/），
+ * 签名时必须使用与服务端一致的路径，否则签名验证失败。
+ *
+ * 判断规则：末尾段为 UUID（resource ID）时不加斜杠，其余 collection 端点加斜杠。
+ */
+function normalizePath(path) {
+  const uri = path.split('?')[0];
+  const segments = uri.split('/').filter(Boolean);
+  const lastSegment = segments[segments.length - 1] || '';
+  // 华为云 resource ID 为 UUID 格式
+  const isResourceId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lastSegment);
+  if (!isResourceId && !uri.endsWith('/')) {
+    return uri + '/';
+  }
+  return uri;
+}
+
+/**
  * 构造规范查询字符串（CanonicalQueryString）
  * 按参数名字典序排序，key=value 格式，用 & 连接
  */
@@ -152,7 +172,8 @@ function signRequest(method, path, queryParams, body, extraHeaders) {
   const canonicalQueryString = buildCanonicalQueryString(queryParams);
 
   // 构造规范 URI（路径部分，以 / 开头）
-  const canonicalUri = path.split('?')[0];
+  // 华为云服务端会对 collection 端点自动添加尾部斜杠，签名必须使用规范化后的路径
+  const canonicalUri = normalizePath(path);
 
   // 请求体哈希（GET/DELETE 无 body，body 为空字符串）
   const payload = body || '';
@@ -215,9 +236,12 @@ function formatSdkDate(date) {
  * @returns {Promise<object|null>} - 响应 JSON 或 null (204)
  */
 async function hwDnsRequest(method, path, queryParams = {}, body = null) {
-  // 构造完整 URL（用于 fetch）
+  // 规范化路径（华为云服务端会对 collection 端点自动加尾部斜杠）
+  const normalizedPath = normalizePath(path);
+
+  // 构造完整 URL（用于 fetch），使用规范化后的路径
   const queryString = buildCanonicalQueryString(queryParams);
-  const fullPath = queryString ? `${path}?${queryString}` : path;
+  const fullPath = queryString ? `${normalizedPath}?${queryString}` : normalizedPath;
   const url = `${HW_DNS_ENDPOINT}${fullPath}`;
 
   // 签名需要额外的请求头
@@ -226,7 +250,7 @@ async function hwDnsRequest(method, path, queryParams = {}, body = null) {
     extraHeaders['content-type'] = 'application/json';
   }
 
-  // 构造签名头
+  // 构造签名头（签名内部也会使用 normalizePath 规范化路径）
   const signedHeaders = signRequest(method, path, queryParams, body, extraHeaders);
 
   // 构造 fetch 请求头（签名头 + body 相关头）
