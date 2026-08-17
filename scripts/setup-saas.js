@@ -115,6 +115,13 @@ async function main() {
     const dnsProvider = sc.zoneDnsProvider(zone);
     const provTag = dnsProvider === sc.DNS_PROVIDER_HW ? ' [华为云DNS]' : '';
 
+    // 华为云 zone 在无 AK/SK 时跳过（CI 环境不配置华为云密钥，由 Docker cron 负责同步）
+    if (dnsProvider === sc.DNS_PROVIDER_HW && (!process.env.HUAWEICLOUD_DNS_AK || !process.env.HUAWEICLOUD_DNS_SK)) {
+      console.log(`\n━━━ Zone: ${zoneName}${provTag} ━━━`);
+      console.log(`  ⊘ 跳过 — 华为云 DNS 环境变量未配置（CI 由 Docker cron 同步）`);
+      continue;
+    }
+
     console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey})${provTag} ━━━`);
 
     let zoneId;
