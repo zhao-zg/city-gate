@@ -236,12 +236,11 @@ function formatSdkDate(date) {
  * @returns {Promise<object|null>} - 响应 JSON 或 null (204)
  */
 async function hwDnsRequest(method, path, queryParams = {}, body = null) {
-  // 规范化路径（华为云服务端会对 collection 端点自动加尾部斜杠）
-  const normalizedPath = normalizePath(path);
-
-  // 构造完整 URL（用于 fetch），使用规范化后的路径
+  // 构造完整 URL（用于 fetch），使用原始路径
+  // 注意：签名时使用 normalizePath 规范化后的路径（华为云签名验证期望带尾部斜杠），
+  // 但实际 API 路由期望原始路径（不带尾部斜杠），两者必须区分
   const queryString = buildCanonicalQueryString(queryParams);
-  const fullPath = queryString ? `${normalizedPath}?${queryString}` : normalizedPath;
+  const fullPath = queryString ? `${path}?${queryString}` : path;
   const url = `${HW_DNS_ENDPOINT}${fullPath}`;
 
   // 签名需要额外的请求头
