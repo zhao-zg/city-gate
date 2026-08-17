@@ -18,6 +18,54 @@
  * 运行时自动展开 prefix.zone 为完整域名，匹配后透明转发。
  */
 
+// 模块级缓存 — Worker 实例复用时避免重复 JSON.parse + 遍历构建 domainMap
+let _cachedConfigRaw = null;
+let _cachedDomainMap = null;
+
+function getDomainMap(env) {
+  const raw = env.DOMAIN_CONFIG_JSON;
+  // 配置字符串未变 → 直接复用缓存的映射表
+  if (raw === _cachedConfigRaw && _cachedDomainMap) {
+    return _cachedDomainMap;
+  }
+
+  const config = JSON.parse(raw);
+  const domainMap = {};
+  const groups = config.groups || [];
+  const zones = config.zones || [];
+
+  for (const group of groups) {
+    const groupZones = group.zones || zones;
+    for (const zone of groupZones) {
+      const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
+      if (!zoneName) continue;
+      const domain = `${group.prefix}.${zoneName}`;
+
+      let target;
+      let isPages = false;
+
+      if (group.pages_domain) {
+        target = group.pages_domain;
+        isPages = true;
+      } else if (group.origin) {
+        target = group.origin;
+        isPages = false;
+      } else if (group.pages_project) {
+        console.error(`group "${group.prefix}" 有 pages_project 但无 pages_domain，跳过`);
+        continue;
+      }
+
+      if (target) {
+        domainMap[domain] = { target, isPages };
+      }
+    }
+  }
+
+  _cachedConfigRaw = raw;
+  _cachedDomainMap = domainMap;
+  return domainMap;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -55,59 +103,21 @@ export default {
       });
     }
 
-    // 1. 加载配置
-    let config;
+    // 1. 加载配置 + 构建 domainMap（模块级缓存，Worker 实例复用时只解析一次）
+    let domainMap;
     try {
-      config = JSON.parse(env.DOMAIN_CONFIG_JSON);
+      domainMap = getDomainMap(env);
     } catch {
       return new Response('网关配置错误：DOMAIN_CONFIG_JSON 缺失或非法', { status: 500 });
     }
 
-    // 2. 展开 zones + groups → hostname → target 映射
-    const domainMap = {};
-    const groups = config.groups || [];
-    const zones = config.zones || [];
-
-    for (const group of groups) {
-      const groupZones = group.zones || zones;
-      for (const zone of groupZones) {
-        const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
-        if (!zoneName) continue;
-        const domain = `${group.prefix}.${zoneName}`;
-
-        // 确定转发目标：
-        //   pages_domain（CI 自动注入的真实域名）> origin（外部源站）
-        let target;
-        let isPages = false;
-
-        if (group.pages_domain) {
-          // CI 通过 API 查询的真实 *.pages.dev 域名
-          target = group.pages_domain;
-          isPages = true;
-        } else if (group.origin) {
-          // 非 Pages 源站
-          target = group.origin;
-          isPages = false;
-        } else if (group.pages_project) {
-          // pages_project 仅作标识，不用于拼接域名
-          // 到达这里说明 resolve-pages.js 未成功运行或该 Pages 项目不存在
-          console.error(`group "${group.prefix}" 有 pages_project 但无 pages_domain，跳过`);
-          continue;
-        }
-
-        if (target) {
-          domainMap[domain] = { target, isPages };
-        }
-      }
-    }
-
-    // 3. 查找当前域名的转发目标
+    // 2. 查找当前域名的转发目标
     const route = domainMap[hostname];
     if (!route) {
       return new Response('Not Found', { status: 404 });
     }
 
-    // 4. 透明转发
+    // 3. 透明转发
     const originPrefix = route.isPages ? 'https://' : '';
     const target = `${originPrefix}${route.target}${url.pathname}${url.search}`;
 
