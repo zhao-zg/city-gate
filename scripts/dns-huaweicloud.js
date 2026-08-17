@@ -263,13 +263,42 @@ async function hwDnsRequest(method, path, queryParams = {}, body = null) {
     fetchHeaders['content-type'] = 'application/json';
   }
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: method.toUpperCase(),
     headers: fetchHeaders,
     body: body || undefined,
   });
 
   return handleResponse(res, path);
+}
+
+/**
+ * 带重试的 fetch 封装
+ *
+ * NAS 环境下本地 DNS (OpenClash/dnsmasq) 偶尔返回 EAI_AGAIN，
+ * 导致 fetch 的 DNS 解析间歇性失败。增加自动重试机制。
+ */
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  let lastErr;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      lastErr = err;
+      // DNS 解析失败（EAI_AGAIN）或网络瞬时错误，等待后重试
+      if (err.cause && (err.cause.code === 'EAI_AGAIN' || err.cause.code === 'ENOTFOUND')) {
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+        continue;
+      }
+      // 其他错误也重试一次（fetch failed 可能是网络瞬时问题）
+      if (i < maxRetries - 1 && err.message && err.message.includes('fetch failed')) {
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 async function handleResponse(res, path) {
