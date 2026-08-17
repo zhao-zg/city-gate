@@ -23,6 +23,7 @@
  *   const ispIps = await fetchIspIps();
  */
 
+const http = require('http');
 const https = require('https');
 
 const ISP_IP_SOURCE = process.env.ISP_IP_SOURCE || 'cf.090227.xyz';
@@ -39,11 +40,31 @@ const HW_LINES = {
 /**
  * 从指定端点拉取 IP 列表
  * 返回格式：每行 "IP#注释"，取 # 前面的 IP
+ *
+ * 优先使用 HTTPS，若 HTTPS 失败（证书错误/连接重置等）则自动降级到 HTTP。
+ * 某些 CF 优选 IP 源的 443 端口可能被重置，但 80 端口正常。
  */
 async function fetchIpsFromEndpoint(path) {
-  const url = `https://${ISP_IP_SOURCE}/${path}`;
+  const httpsUrl = `https://${ISP_IP_SOURCE}/${path}`;
+  const httpUrl = `http://${ISP_IP_SOURCE}/${path}`;
+
+  // 先尝试 HTTPS
+  try {
+    return await fetchWith(httpsUrl, https);
+  } catch (httpsErr) {
+    // HTTPS 失败，降级到 HTTP
+    try {
+      return await fetchWith(httpUrl, http);
+    } catch (httpErr) {
+      // 两个都失败，抛出 HTTPS 的错误（更有参考价值）
+      throw httpsErr;
+    }
+  }
+}
+
+function fetchWith(url, mod) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { timeout: 10000 }, (res) => {
+    const req = mod.get(url, { timeout: 10000 }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
