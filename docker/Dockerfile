@@ -62,5 +62,8 @@ ENV ENABLE_CF_TOP20=""
 ENV HUAWEICLOUD_DNS_AK=""
 ENV HUAWEICLOUD_DNS_SK=""
 ENV HUAWEICLOUD_DNS_ENDPOINT="https://dns.myhuaweicloud.com"
+# 三网优选 IP 源（华为云分线路解析用）
+ENV ISP_IP_SOURCE="cf.090227.xyz"
+ENV ISP_IP_PER_LINE="2"
 
 ENTRYPOINT ["/entrypoint.sh"]

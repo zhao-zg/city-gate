@@ -32,6 +32,8 @@
  *   IP_SOURCE（可选）     — IP 来源：domain=域名解析(默认) / cidr=CF CIDR扫描 / both=两者合并 / 自定义(CIDR,IP,域名混合)
  *   CIDR_SAMPLES（可选）  — 每个 CIDR 最多采样 IP 数（默认 100）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
+ *   ISP_IP_SOURCE（可选） — 三网优选 IP 源域名（默认 cf.090227.xyz，华为云分线路用）
+ *   ISP_IP_PER_LINE（可选）— 每条线路取几个 IP（默认 2）
  *
  * 用法：
  *   node scripts/sync-dns.js             # 执行同步+检验+测速
@@ -42,6 +44,7 @@ const https = require('https');
 const http = require('http');
 const net = require('net');
 const sc = require('./sync-cname');
+const { fetchIspIps, HW_LINES } = require('./fetch-isp-ips');
 
 // ── 短命请求用 Agent：关闭 keep-alive，用完立即释放 TCP 连接 ──
 // 避免 cron 空闲期间 conntrack/fd 被大量 keep-alive socket 占用
@@ -774,7 +777,8 @@ async function buildIpPool(testHost, needCount) {
  * IP 不够时允许跨 zone 复用（轮转分配）
  */
 function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
-  const poolZones = zoneMap.filter(z => !z.noPreferred);
+  // 华为云 zone 走三网分线路，不从 CF IP 池分 IP
+  const poolZones = zoneMap.filter(z => !z.noPreferred && z.dnsProvider !== 'huaweicloud');
   const assignments = [];
   const poolLen = ipPool.length;
 
@@ -820,6 +824,36 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
         direct: true,
         target: origin,
       });
+    }
+  }
+
+  // 华为云 zone：加入 assignment 列表（不分配 CF IP，由 processHwIspRecords 单独处理）
+  // 有 origin 的前缀走 direct 模式（CNAME 直连源站，显式覆盖通配符 A）
+  for (const zone of zoneMap) {
+    if (zone.dnsProvider !== 'huaweicloud' || zone.noPreferred) continue;
+    for (const name of zone.names) {
+      const origin = (zone.origins && zone.origins[name]) || null;
+      if (origin) {
+        assignments.push({
+          fqdn: `${name}.${zone.zoneName}`,
+          zoneName: zone.zoneName,
+          name,
+          tokenKey: zone.tokenKey,
+          dnsProvider: 'huaweicloud',
+          direct: true,
+          target: origin,
+        });
+      } else {
+        assignments.push({
+          fqdn: `${name}.${zone.zoneName}`,
+          zoneName: zone.zoneName,
+          name,
+          tokenKey: zone.tokenKey,
+          dnsProvider: 'huaweicloud',
+          // ips 为空，processHwIspRecords 会拉取三网 IP
+          ips: [],
+        });
+      }
     }
   }
 
@@ -873,6 +907,173 @@ function printAssignmentPlan(assignments) {
 }
 
 // ── DNS 同步主逻辑 ──────────────────────────────────
+
+/**
+ * 华为云三网分线路同步
+ *
+ * 为华为云 DNS zone 创建通配符泛解析记录，按运营商线路分别指向对应优选 IP：
+ *   *.zzgxxx.eu.org  A  Dianxin   → [电信IP1, 电信IP2]
+ *   *.zzgxxx.eu.org  A  Liantong  → [联通IP1, 联通IP2]
+ *   *.zzgxxx.eu.org  A  Yidong    → [移动IP1, 移动IP2]
+ *   *.zzgxxx.eu.org  A  default   → [默认IP1, 默认IP2]
+ *
+ * answer 等源站直连子域名单独显式 CNAME，覆盖通配符
+ *
+ * @param {Array} hwAssignments — 华为云 zone 的 assignments（含 direct 和非 direct）
+ * @returns {Promise<{created, deleted, skipped, errors}>}
+ */
+async function processHwIspRecords(hwAssignments) {
+  const dryRun = process.env.DRY_RUN === '1';
+
+  // 按 zoneName 分组
+  const zoneGroups = {};
+  for (const a of hwAssignments) {
+    if (!zoneGroups[a.zoneName]) {
+      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, items: [] };
+    }
+    zoneGroups[a.zoneName].items.push(a);
+  }
+
+  let totalStats = { created: 0, deleted: 0, skipped: 0, errors: 0 };
+
+  // 拉取三网优选 IP
+  const ispIps = await fetchIspIps();
+  const hasIspIps = ispIps.telecom.length > 0 || ispIps.unicom.length > 0 || ispIps.mobile.length > 0;
+  if (!hasIspIps) {
+    console.error('  ✗ 三网优选 IP 全部拉取失败，无法配置分线路解析');
+    totalStats.errors = hwAssignments.length;
+    return totalStats;
+  }
+
+  // 华为云分线路定义
+  const lineConfig = [
+    { line: HW_LINES.telecom, ips: ispIps.telecom, label: '电信' },
+    { line: HW_LINES.unicom, ips: ispIps.unicom, label: '联通' },
+    { line: HW_LINES.mobile, ips: ispIps.mobile, label: '移动' },
+    { line: HW_LINES.default, ips: ispIps.default, label: '默认' },
+  ].filter((l) => l.ips.length > 0);
+
+  for (const [zoneName, group] of Object.entries(zoneGroups)) {
+    const tokenKey = group.tokenKey;
+    console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey}) [华为云DNS 三网分线路] ━━━`);
+
+    let zoneId;
+    try {
+      zoneId = await sc.getZoneId(zoneName, tokenKey, 'huaweicloud');
+    } catch (e) {
+      console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
+      totalStats.errors += group.items.length;
+      continue;
+    }
+
+    // 区分：Pages 子域名（走通配符 A） vs 源站直连（走显式 CNAME）
+    const directItems = group.items.filter((a) => a.direct);
+    const poolItems = group.items.filter((a) => !a.direct);
+
+    // ── 通配符 A 记录：一条 * 记录覆盖所有 Pages 子域名 ──
+    if (poolItems.length > 0) {
+      const wildcardName = `*.${zoneName}`;
+      console.log(`\n  ▸ ${wildcardName} → 三网分线路 A 记录`);
+
+      try {
+        // 查询现有记录
+        const existingRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
+
+        // 按线路分组现有记录
+        const existingByLine = {};
+        for (const rec of existingRecords) {
+          if (rec.type !== 'A') continue;
+          const line = rec.line || 'default_view';
+          if (!existingByLine[line]) existingByLine[line] = [];
+          existingByLine[line].push(rec);
+        }
+
+        for (const lc of lineConfig) {
+          const targetIps = lc.ips;
+          const existing = existingByLine[lc.line] || [];
+
+          // 对比 IP 是否一致
+          const existingIps = existing.flatMap((r) => r.records || []);
+          const targetSet = new Set(targetIps);
+          const existingSet = new Set(existingIps);
+
+          const ipsMatch =
+            targetSet.size === existingSet.size &&
+            [...targetSet].every((ip) => existingSet.has(ip));
+
+          if (ipsMatch) {
+            console.log(`    [${lc.label}] A ${targetIps.join(', ')} → 已匹配，跳过`);
+            totalStats.skipped++;
+          } else {
+            // 删除旧记录
+            for (const rec of existing) {
+              console.log(`    [${lc.label}] 删除旧 A → ${(rec.records || []).join(', ')} (id: ${rec.id})`);
+              if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+              totalStats.deleted++;
+            }
+            // 创建新记录
+            console.log(`    [${lc.label}] 创建 A → ${targetIps.join(', ')}`);
+            if (!dryRun) {
+              await sc.createARecord(zoneId, wildcardName, targetIps, tokenKey, 'huaweicloud', {
+                ips: targetIps,
+                line: lc.line,
+              });
+            }
+            totalStats.created++;
+          }
+        }
+
+        // 清理非分线路的旧 A 记录（line=default_view 但不在 lineConfig 中的，或重复的）
+        const validLines = new Set(lineConfig.map((l) => l.line));
+        for (const rec of existingRecords) {
+          if (rec.type !== 'A') continue;
+          const line = rec.line || 'default_view';
+          if (!validLines.has(line)) {
+            console.log(`    [清理] 删除无效线路 A → ${(rec.records || []).join(', ')} (line: ${line}, id: ${rec.id})`);
+            if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+            totalStats.deleted++;
+          }
+        }
+      } catch (e) {
+        console.error(`    ✗ 通配符记录处理失败: ${e.message}`);
+        totalStats.errors++;
+      }
+    }
+
+    // ── 源站直连 CNAME（answer 等，显式覆盖通配符） ──
+    for (const a of directItems) {
+      const { fqdn, target } = a;
+      console.log(`\n  ▸ ${fqdn} → CNAME ${target} (源站直连，覆盖通配符)`);
+      try {
+        const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, 'huaweicloud');
+        const cnameRecords = records.filter((r) => r.type === 'CNAME');
+        const matched = cnameRecords.filter((r) => r.content === target);
+
+        if (matched.length > 0) {
+          console.log(`    CNAME 已指向 ${target} → 跳过`);
+          totalStats.skipped++;
+        } else {
+          // 删除旧记录（A 记录和旧 CNAME）
+          for (const rec of records) {
+            console.log(`    删除旧 ${rec.type} → ${rec.content} (id: ${rec.id})`);
+            if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+            totalStats.deleted++;
+          }
+          console.log(`    创建 CNAME → ${target}`);
+          if (!dryRun) {
+            await sc.createCnameRecord(zoneId, fqdn, target, tokenKey, 'huaweicloud', false, {});
+          }
+          totalStats.created++;
+        }
+      } catch (e) {
+        console.error(`    ✗ 处理失败: ${e.message}`);
+        totalStats.errors++;
+      }
+    }
+  }
+
+  return totalStats;
+}
 
 async function processARecords(assignments) {
   const dryRun = process.env.DRY_RUN === '1';
@@ -1010,11 +1211,12 @@ async function main() {
     console.log(`  TOKEN_KEY=${filterTokenKey} 过滤: ${before} → ${filteredZones.length} 个 Zone`);
   }
 
-  const poolZones = filteredZones.filter(z => !z.noPreferred);
+  // 华为云 zone 走三网分线路，不参与 CF IP 池测速
+  const poolZones = filteredZones.filter(z => !z.noPreferred && z.dnsProvider !== 'huaweicloud');
   const noPrefZones = filteredZones.filter(z => z.noPreferred);
   const hwZones = filteredZones.filter(z => z.dnsProvider === 'huaweicloud');
   const cfZones = filteredZones.filter(z => z.dnsProvider !== 'huaweicloud');
-  console.log(`  共 ${filteredZones.length} 个 Zone（使用 A 记录: ${poolZones.length}，直连源站: ${noPrefZones.length}）`);
+  console.log(`  共 ${filteredZones.length} 个 Zone（CF A 记录: ${poolZones.length}，直连源站: ${noPrefZones.length}，华为云三网: ${hwZones.length}）`);
   if (hwZones.length > 0) {
     console.log(`  DNS Provider: Cloudflare ${cfZones.length} / 华为云 ${hwZones.length} (${hwZones.map(z => z.zoneName).join(', ')})`);
   }
@@ -1266,7 +1468,28 @@ async function main() {
   const assignments = assignIpsToZones(filteredZones, finalPool, IP_PER_ZONE);
   printAssignmentPlan(assignments);
 
-  const syncStats = await processARecords(assignments);
+  // 华为云 zone 走三网分线路逻辑，CF zone 走原有逻辑
+  const hwAssignments = assignments.filter(a => a.dnsProvider === 'huaweicloud');
+  const cfAssignments = assignments.filter(a => a.dnsProvider !== 'huaweicloud');
+
+  let syncStats = { created: 0, deleted: 0, skipped: 0, errors: 0 };
+
+  if (hwAssignments.length > 0) {
+    console.log('\n── 华为云 DNS 三网分线路同步 ──');
+    const hwStats = await processHwIspRecords(hwAssignments);
+    syncStats.created += hwStats.created;
+    syncStats.deleted += hwStats.deleted;
+    syncStats.skipped += hwStats.skipped;
+    syncStats.errors += hwStats.errors;
+  }
+
+  if (cfAssignments.length > 0) {
+    const cfStats = await processARecords(cfAssignments);
+    syncStats.created += cfStats.created;
+    syncStats.deleted += cfStats.deleted;
+    syncStats.skipped += cfStats.skipped;
+    syncStats.errors += cfStats.errors;
+  }
 
   console.log('\n━━━ 同步汇总 ━━━');
   console.log(`  创建: ${syncStats.created}  删除: ${syncStats.deleted}  跳过: ${syncStats.skipped}  错误: ${syncStats.errors}`);
@@ -1320,19 +1543,56 @@ async function main() {
   }
 
   for (const [zoneName, group] of Object.entries(zoneGroups)) {
-    const provTag = group.dnsProvider === 'huaweicloud' ? ' [华为云DNS]' : '';
+    const dnsProvider = group.dnsProvider || 'cloudflare';
+    const provTag = dnsProvider === 'huaweicloud' ? ' [华为云DNS]' : '';
     console.log(`\n  Zone: ${zoneName}${provTag}`);
     let zoneId;
     try {
-      zoneId = await sc.getZoneId(zoneName, group.tokenKey, group.dnsProvider);
+      zoneId = await sc.getZoneId(zoneName, group.tokenKey, dnsProvider);
     } catch (e) {
       console.error(`    ✗ 获取 Zone ID 失败: ${e.message}`);
       continue;
     }
 
+    if (dnsProvider === 'huaweicloud') {
+      // 华为云 zone：通配符记录无法按具体 FQDN 查到，统一查 *.zone
+      const wildcardName = `*.${zoneName}`;
+      try {
+        const wRecords = await sc.getDnsRecords(zoneId, wildcardName, group.tokenKey, dnsProvider);
+        if (wRecords.length === 0) {
+          console.log(`    ⚠ ${wildcardName}: 无 DNS 记录`);
+        } else {
+          for (const rec of wRecords) {
+            const lineTag = rec.line && rec.line !== 'default_view' ? ` [${rec.line}]` : '';
+            console.log(`    ${wildcardName}: ${rec.type} → ${rec.content}${lineTag}`);
+          }
+        }
+      } catch (e) {
+        console.error(`    ✗ ${wildcardName} 查询失败: ${e.message}`);
+      }
+      // 再显示显式 CNAME（answer 等直连子域名，覆盖通配符）
+      for (const f of group.items) {
+        if (!f.origin) continue; // 跳过通配符覆盖的子域名（已在上面显示）
+        try {
+          const records = await sc.getDnsRecords(zoneId, f.fqdn, group.tokenKey, dnsProvider);
+          if (records.length === 0) {
+            console.log(`    ⚠ ${f.fqdn}: 无 DNS 记录`);
+          } else {
+            for (const rec of records) {
+              console.log(`    ${f.fqdn}: ${rec.type} → ${rec.content}`);
+            }
+          }
+        } catch (e) {
+          console.error(`    ✗ ${f.fqdn} 查询失败: ${e.message}`);
+        }
+      }
+      continue;
+    }
+
+    // 默认 Cloudflare zone：逐 FQDN 查询
     for (const f of group.items) {
       try {
-        const records = await sc.getDnsRecords(zoneId, f.fqdn, group.tokenKey, group.dnsProvider);
+        const records = await sc.getDnsRecords(zoneId, f.fqdn, group.tokenKey, dnsProvider);
         if (records.length === 0) {
           console.log(`    ⚠ ${f.fqdn}: 无 DNS 记录`);
         } else {
@@ -1361,11 +1621,17 @@ async function main() {
       continue;
     }
 
-    // 取第一个 A 记录 IP 直连，避免系统 DNS 解析到不可控 IP；
-    // 同时 SNI=fqdn 可准确检测 CF 边缘是否有该域名证书（无证书会 RST）
-    const checkIp = f.aRecordIps && f.aRecordIps[0] ? f.aRecordIps[0] : null;
+    // 华为云 zone：通配符记录无法按具体 FQDN 收集 IP，回退到系统 DNS 检测
+    // CF zone：优先直连 A 记录 IP，避免系统 DNS 解析到不可控 IP
+    const isHwZone = f.dnsProvider === 'huaweicloud';
+    let checkIp = null;
+    if (!isHwZone) {
+      checkIp = f.aRecordIps && f.aRecordIps[0] ? f.aRecordIps[0] : null;
+    }
     if (checkIp) {
       console.log(`  ▸ 检测 ${f.fqdn} (→ ${checkIp})...`);
+    } else if (isHwZone) {
+      console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS，华为云通配符)...`);
     } else {
       console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS)...`);
     }

@@ -52,6 +52,9 @@ services:
       - HUAWEICLOUD_DNS_AK=${HUAWEICLOUD_DNS_AK:-}
       - HUAWEICLOUD_DNS_SK=${HUAWEICLOUD_DNS_SK:-}
       - HUAWEICLOUD_DNS_ENDPOINT=${HUAWEICLOUD_DNS_ENDPOINT:-https://dns.myhuaweicloud.com}
+      # ── 三网优选 IP 源（华为云分线路解析用） ──
+      - ISP_IP_SOURCE=${ISP_IP_SOURCE:-cf.090227.xyz}
+      - ISP_IP_PER_LINE=${ISP_IP_PER_LINE:-2}
     volumes:
       # 持久化日志
       - ./logs:/var/log/city-gate

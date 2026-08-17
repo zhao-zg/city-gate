@@ -8,6 +8,7 @@ on:
       - 'scripts/dns-huaweicloud.js'
       - 'scripts/sync-dns.js'
       - 'scripts/sync-cname.js'
+      - 'scripts/fetch-isp-ips.js'
       - 'scripts/check-dns.js'
       - 'workers/**/wrangler.toml'
       - 'package.json'

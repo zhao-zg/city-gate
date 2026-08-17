@@ -207,8 +207,11 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         if (zoneTokenKey) info.tokenKey = zoneTokenKey;
         if (zoneDnsProv) info.dnsProvider = zoneDnsProv;
 
-        // noPreferred zone 需要记录每个前缀对应的源站（CNAME 直连目标）
-        if (info.noPreferred && group.origin) {
+        // 记录每个前缀对应的源站（CNAME 直连目标）
+        // 无论是否 noPreferred，有 origin 的前缀都需要记录
+        // noPreferred zone: 所有有 origin 的前缀走 CNAME 直连
+        // 非 noPreferred 华为云 zone: 有 origin 的前缀走显式 CNAME 覆盖通配符
+        if (group.origin) {
           info.origins[group.prefix] = stripProtocol(group.origin);
         }
       }
@@ -895,9 +898,9 @@ async function deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider) {
   await cfFetch(`/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE', tokenKey });
 }
 
-async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, proxied = false) {
+async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, proxied = false, options = {}) {
   if (dnsProvider === DNS_PROVIDER_HW) {
-    return hwDns.createCnameRecord(zoneId, name, target);
+    return hwDns.createCnameRecord(zoneId, name, target, options);
   }
   // 默认 Cloudflare
   const body = { type: 'CNAME', name, content: target, proxied, ttl: 1 };
@@ -911,14 +914,18 @@ async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, pr
 /**
  * 创建 A 记录（多 provider）
  * CF: 一条 A 记录一个 IP（多 IP = 多条 A 记录）
- * 华为云: 一条 recordset 一个 IP（与 CF 保持一致的粒度，方便增量同步）
+ * 华为云: 支持 options.ips（多 IP 数组）和 options.line（分线路）
+ *          不传 options 时回退到单 IP 模式，兼容旧调用
  */
-async function createARecord(zoneId, name, ip, tokenKey, dnsProvider) {
+async function createARecord(zoneId, name, ipOrIps, tokenKey, dnsProvider, options = {}) {
   if (dnsProvider === DNS_PROVIDER_HW) {
-    return hwDns.createARecord(zoneId, name, ip);
+    // 华为云支持多 IP + 分线路
+    const ips = options.ips || (Array.isArray(ipOrIps) ? ipOrIps : [ipOrIps]);
+    return hwDns.createARecord(zoneId, name, ips, options);
   }
-  // 默认 Cloudflare
-  const body = { type: 'A', name, content: ip, proxied: false, ttl: 1 };
+  // 默认 Cloudflare（CF 一条 A 记录一个 IP，如果传入数组则取第一个）
+  const cfIp = Array.isArray(ipOrIps) ? ipOrIps[0] : ipOrIps;
+  const body = { type: 'A', name, content: cfIp, proxied: false, ttl: 1 };
   await cfFetch(`/zones/${zoneId}/dns_records`, {
     method: 'POST',
     body: JSON.stringify(body),

@@ -31,8 +31,7 @@ const crypto = require('crypto');
 
 // ── 配置 ─────────────────────────────────────────────
 
-const HW_AK = process.env.HUAWEICLOUD_DNS_AK || '';
-const HW_SK = process.env.HUAWEICLOUD_DNS_SK || '';
+// AK/SK 在签名时实时从 process.env 读取（模块加载和调用可能跨进程环境）
 const HW_DNS_ENDPOINT = process.env.HUAWEICLOUD_DNS_ENDPOINT || 'https://dns.myhuaweicloud.com';
 
 // 从 endpoint 提取 host
@@ -148,7 +147,9 @@ function buildCanonicalHeaders(headers) {
  *   4. 组装 Authorization 头
  */
 function signRequest(method, path, queryParams, body, extraHeaders) {
-  if (!HW_AK || !HW_SK) {
+  const hwAk = process.env.HUAWEICLOUD_DNS_AK || '';
+  const hwSk = process.env.HUAWEICLOUD_DNS_SK || '';
+  if (!hwAk || !hwSk) {
     throw new Error(
       '华为云 DNS 环境变量未设置: 需要 HUAWEICLOUD_DNS_AK 和 HUAWEICLOUD_DNS_SK'
     );
@@ -198,10 +199,10 @@ function signRequest(method, path, queryParams, body, extraHeaders) {
   ].join('\n');
 
   // 步骤 3: 计算签名
-  const signature = hmacSha256Hex(HW_SK, stringToSign);
+  const signature = hmacSha256Hex(hwSk, stringToSign);
 
   // 步骤 4: 组装 Authorization 头
-  const authorization = `SDK-HMAC-SHA256 Access=${HW_AK}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const authorization = `SDK-HMAC-SHA256 Access=${hwAk}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   // 返回所有需要发送的请求头（签名用的 + Authorization）
   return {
@@ -335,8 +336,9 @@ async function getZoneInfo(zoneName) {
  * GET /v2/zones/{zone_id}/recordsets?name={fqdn}
  *
  * 返回统一格式，与 CF getDnsRecords 兼容：
- *   [{ id, type, name, content, proxied: false }]
+ *   [{ id, type, name, content, records, ttl, proxied: false, line }]
  * 华为云 records 是数组（多值），content 用逗号连接以兼容 CF 的"一条一 IP"模型
+ * line 字段标明线路（default_view / Dianxin / Liantong / Yidong），无分线路时为 'default_view'
  */
 async function getDnsRecords(zoneId, fqdn) {
   const queryParams = {
@@ -356,36 +358,58 @@ async function getDnsRecords(zoneId, fqdn) {
     records: rs.records,
     ttl: rs.ttl,
     proxied: false, // 华为云无 proxied 概念
+    line: rs.line || 'default_view',
   }));
 }
 
 /**
- * 创建 A 记录
+ * 创建 A 记录（支持分线路 + 多 IP）
  * POST /v2/zones/{zone_id}/recordsets
  *
- * 华为云一条 recordset 可含多个 IP，但为了兼容 CF 的"一条一 IP"模型，
- * 这里每次创建一个单 IP 的 recordset
+ * 参数：
+ *   zoneId — Zone ID
+ *   name   — 记录名（如 '*.zzgxxx.eu.org' 或 'sg.zzgxxx.eu.org'）
+ *   ips    — IP 数组（一条 recordset 可含多个 IP）
+ *   line   — 线路（可选）：'default_view' / 'Dianxin' / 'Liantong' / 'Yidong'
+ *            不传或 'default_view' = 默认线路
+ *   ttl    — TTL 秒数（可选，默认 300）
+ *
+ * 华为云 API 文档：CreateRecordSetWithLine
+ *   请求体中 line 字段指定线路，records 是数组可含多个 IP
+ *   通配符泛解析：name 使用 '*' 即可（如 '*.example.com.'）
  */
-async function createARecord(zoneId, name, ip) {
-  const body = JSON.stringify({
+async function createARecord(zoneId, name, ips, options = {}) {
+  const { line, ttl = 300 } = options;
+  const bodyObj = {
     name: name + '.', // 华为云要求完整 FQDN 带尾部点号
     type: 'A',
-    ttl: 300,
-    records: [ip],
-  });
+    ttl,
+    records: Array.isArray(ips) ? ips : [ips],
+  };
+  // 仅当指定了非默认线路时才传 line 字段
+  if (line && line !== 'default_view') {
+    bodyObj.line = line;
+  }
+  const body = JSON.stringify(bodyObj);
   await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
 }
 
 /**
- * 创建 CNAME 记录
+ * 创建 CNAME 记录（支持分线路）
+ * 参数 options.line 可选，指定线路
  */
-async function createCnameRecord(zoneId, name, target) {
-  const body = JSON.stringify({
+async function createCnameRecord(zoneId, name, target, options = {}) {
+  const { line } = options;
+  const bodyObj = {
     name: name + '.',
     type: 'CNAME',
     ttl: 300,
     records: [target.endsWith('.') ? target : target + '.'],
-  });
+  };
+  if (line && line !== 'default_view') {
+    bodyObj.line = line;
+  }
+  const body = JSON.stringify(bodyObj);
   await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
 }
 
