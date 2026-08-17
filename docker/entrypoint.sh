@@ -58,9 +58,12 @@ run_script() {
       ;;
   esac
 
+  local start_ts end_ts elapsed elapsed_h elapsed_m elapsed_s
+  start_ts=$(date +%s)
+
   echo ""
   echo "════════════════════════════════════════════════════════════"
-  echo "  city-gate-cron  $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "  city-gate-cron 开始: $(date '+%Y-%m-%d %H:%M:%S %Z')"
   echo "  模式: $mode (同步 DNS + 检验 + 测速)  |  DRY_RUN: ${DRY_RUN:-0}"
   echo "════════════════════════════════════════════════════════════"
   echo ""
@@ -71,12 +74,24 @@ run_script() {
   rm -f "$LOCK_FILE"
   trap - EXIT
 
+  end_ts=$(date +%s)
+  elapsed=$((end_ts - start_ts))
+  elapsed_h=$((elapsed / 3600))
+  elapsed_m=$(( (elapsed % 3600) / 60 ))
+  elapsed_s=$((elapsed % 60))
+
   if [ "$exit_code" -ne 0 ]; then
     echo "[ERROR] 脚本执行失败 (exit: $exit_code)"
     notify "city-gate 执行失败" "模式: $mode, 退出码: $exit_code, 时间: $(date '+%Y-%m-%d %H:%M:%S')"
   else
     echo "[OK] 脚本执行完成"
   fi
+
+  echo "──────────────────────────────────────────────────────────────"
+  echo "  city-gate-cron 结束: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf "  耗时: %02d:%02d:%02d (%ds)\n" "$elapsed_h" "$elapsed_m" "$elapsed_s" "$elapsed"
+  echo "──────────────────────────────────────────────────────────────"
+  echo ""
 
   return $exit_code
 }
