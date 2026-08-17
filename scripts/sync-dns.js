@@ -1020,7 +1020,15 @@ async function processHwIspRecords(hwAssignments) {
         // 查询现有记录
         const existingRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
 
-        // 按线路分组现有记录
+        // 先删除同名 CNAME 记录（旧通配符 CNAME 会与 A 记录冲突）
+        const conflictingCnames = existingRecords.filter((r) => r.type === 'CNAME');
+        for (const rec of conflictingCnames) {
+          console.log(`    [清理] 删除冲突 CNAME → ${rec.content} (id: ${rec.id})`);
+          if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+          totalStats.deleted++;
+        }
+
+        // 按线路分组现有 A 记录
         const existingByLine = {};
         for (const rec of existingRecords) {
           if (rec.type !== 'A') continue;
