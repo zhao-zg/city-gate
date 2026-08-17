@@ -305,6 +305,17 @@ async function handleResponse(res, path) {
  * GET /v2/zones?zone_type=public&name={zoneName}
  */
 async function getZoneId(zoneName) {
+  const zone = await getZoneInfo(zoneName);
+  return zone.id;
+}
+
+/**
+ * 查询公网 Zone 完整信息（含 NS 列表）
+ * GET /v2/zones?zone_type=public&name={zoneName}
+ *
+ * 返回: { id, name, zone_type, status, ns: [...], pool_id, record_num, ... }
+ */
+async function getZoneInfo(zoneName) {
   const queryParams = {
     zone_type: 'public',
     name: zoneName + '.',
@@ -314,7 +325,7 @@ async function getZoneId(zoneName) {
   if (zones.length === 0) {
     throw new Error(`华为云公网 Zone "${zoneName}" 未找到，请在华为云控制台创建公网域名`);
   }
-  return zones[0].id;
+  return zones[0];
 }
 
 // ── 记录集操作 ───────────────────────────────────────
@@ -390,6 +401,7 @@ async function deleteDnsRecord(zoneId, recordId) {
 
 module.exports = {
   getZoneId,
+  getZoneInfo,
   getDnsRecords,
   createARecord,
   createCnameRecord,
