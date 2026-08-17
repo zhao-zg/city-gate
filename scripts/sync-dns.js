@@ -1037,6 +1037,11 @@ async function processHwIspRecords(hwAssignments) {
           existingByLine[line].push(rec);
         }
 
+        // 尝试分线路模式：逐线路创建 A 记录
+        // 如果 NS 未切换到华为云，分线路会失败降级为 default_view
+        // 此时改为合并所有 IP 创建一条 default_view 记录
+        let ispLinesSupported = true;
+
         for (const lc of lineConfig) {
           const targetIps = lc.ips;
           const existing = existingByLine[lc.line] || [];
@@ -1063,9 +1068,56 @@ async function processHwIspRecords(hwAssignments) {
             // 创建新记录
             console.log(`    [${lc.label}] 创建 A → ${targetIps.join(', ')}`);
             if (!dryRun) {
-              await sc.createARecord(zoneId, wildcardName, targetIps, tokenKey, 'huaweicloud', {
-                ips: targetIps,
-                line: lc.line,
+              try {
+                await sc.createARecord(zoneId, wildcardName, targetIps, tokenKey, 'huaweicloud', {
+                  ips: targetIps,
+                  line: lc.line,
+                });
+              } catch (createErr) {
+                if (createErr.message && createErr.message.includes('already exists')) {
+                  // 分线路降级为 default_view 后，多条线路重复创建 default_view 冲突
+                  // 标记分线路不支持，后续改为合并模式
+                  console.log(`    [${lc.label}] 分线路降级冲突，切换为合并模式`);
+                  ispLinesSupported = false;
+                  break;
+                } else {
+                  throw createErr;
+                }
+              }
+            }
+            totalStats.created++;
+          }
+        }
+
+        // 如果分线路不支持（NS 未切换），合并所有 IP 创建/更新一条 default_view 记录
+        if (!ispLinesSupported) {
+          const allIps = [...new Set(lineConfig.flatMap((l) => l.ips))];
+          const existingDefault = existingByLine[HW_LINES.default] || [];
+
+          // 对比 IP 是否一致
+          const existingIps = existingDefault.flatMap((r) => r.records || []);
+          const targetSet = new Set(allIps);
+          const existingSet = new Set(existingIps);
+          const ipsMatch =
+            targetSet.size === existingSet.size &&
+            [...targetSet].every((ip) => existingSet.has(ip));
+
+          if (ipsMatch) {
+            console.log(`    [默认] A ${allIps.join(', ')} → 已匹配，跳过`);
+            totalStats.skipped++;
+          } else {
+            // 删除旧 default_view A 记录
+            for (const rec of existingDefault) {
+              console.log(`    [默认] 删除旧 A → ${(rec.records || []).join(', ')} (id: ${rec.id})`);
+              if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+              totalStats.deleted++;
+            }
+            // 创建合并的 default_view 记录
+            console.log(`    [默认] 创建 A → ${allIps.join(', ')} (合并三网 IP)`);
+            if (!dryRun) {
+              await sc.createARecord(zoneId, wildcardName, allIps, tokenKey, 'huaweicloud', {
+                ips: allIps,
+                line: HW_LINES.default,
               });
             }
             totalStats.created++;
