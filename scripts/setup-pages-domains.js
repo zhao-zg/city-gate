@@ -152,6 +152,17 @@ async function createCfCnameRecord(zoneId, name, target) {
   });
 }
 
+// ── Worker Routes 操作 ──────────────────────────────────
+
+async function getWorkerRoutes(zoneId) {
+  const json = await cfApi(`/zones/${zoneId}/workers/routes`);
+  return json.result || [];
+}
+
+async function deleteWorkerRoute(zoneId, routeId) {
+  await cfApi(`/zones/${zoneId}/workers/routes/${routeId}`, { method: 'DELETE' });
+}
+
 // ── 主逻辑 ──────────────────────────────────────────
 
 async function main() {
@@ -229,6 +240,8 @@ async function main() {
   let totalNsDeleted = 0;
   let totalPagesAdded = 0;
   let totalPagesSkipped = 0;
+  let totalRoutesDeleted = 0;
+  let totalRoutesSkipped = 0;
   let totalErrors = 0;
 
   // 按 zone 分组，每个 zone 只获取一次 zoneId
@@ -351,6 +364,25 @@ async function main() {
           totalPagesAdded++;
         }
 
+        // ── 4c: 删除旧 Worker Route（Pages 子域名不再走 Worker 代理）──
+        const routes = await getWorkerRoutes(zoneId);
+        // 匹配 pattern 如 "sg.zzgxxx.eu.org/*" 或 "sg.zzgxxx.eu.org"
+        const fqdnEsc = fqdn.replace(/\./g, '\\.');
+        const routeRe = new RegExp(`^${fqdnEsc}(/.*)?$`);
+        const matchedRoutes = routes.filter(r => routeRe.test(r.pattern));
+
+        if (matchedRoutes.length > 0) {
+          for (const route of matchedRoutes) {
+            console.log(`    删除 Worker Route: ${route.pattern} (id: ${route.id})`);
+            if (!dryRun) {
+              await deleteWorkerRoute(zoneId, route.id);
+            }
+            totalRoutesDeleted++;
+          }
+        } else {
+          totalRoutesSkipped++;
+        }
+
       } catch (e) {
         console.error(`    ✗ 失败: ${e.message}`);
         totalErrors++;
@@ -370,6 +402,7 @@ async function main() {
   console.log(`  A 记录删除: ${totalADeleted}`);
   console.log(`  NS 记录删除: ${totalNsDeleted}（为创建 CNAME 让路，后续步骤重建）`);
   console.log(`  Pages 自定义域名: 添加 ${totalPagesAdded}  跳过 ${totalPagesSkipped}`);
+  console.log(`  Worker Routes: 删除 ${totalRoutesDeleted}  跳过 ${totalRoutesSkipped}`);
   console.log(`  错误: ${totalErrors}`);
 
   if (totalErrors > 0) {

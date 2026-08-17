@@ -20,10 +20,17 @@ const path = require('path');
 
 const GENERATED_SUFFIX = '.generated.toml';
 
+// ── 判断 zone 是否使用华为云 DNS ──────────────────────────
+function isHuaweiCloudZone(zone) {
+  return typeof zone === 'object' && zone !== null && zone.dnsProvider === 'huaweicloud';
+}
+
 // ── 从 DOMAIN_CONFIG_JSON 展开完整域名列表 ───────────────
 function expandDomains(config) {
   // 新格式：zones + prefixes
-  // zones 元素支持字符串或对象 { name, noPreferred }（noPreferred 仅影响 DNS 同步，不影响路由生成）
+  // zones 元素支持字符串或对象 { name, noPreferred, dnsProvider }
+  // 华为云 DNS zone 的 Pages 子域名不走 Worker Route（走 Pages 自定义域名），
+  // 只有有 origin 的子域名仍需 Worker Route。
   if (config.zones && Array.isArray(config.groups)) {
     const domains = [];
     for (const group of config.groups) {
@@ -31,6 +38,11 @@ function expandDomains(config) {
       for (const zone of zones) {
         const zoneName = typeof zone === 'string' ? zone : (zone && zone.name);
         if (!zoneName) continue;
+
+        // 华为云 zone：只有 origin 子域名需要 Worker Route，Pages 子域名跳过
+        if (isHuaweiCloudZone(zone) && group.pages_project) {
+          continue;
+        }
         domains.push(`${group.prefix}.${zoneName}`);
       }
     }
