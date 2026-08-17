@@ -29,11 +29,12 @@
  *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
  *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次不取平均）
  *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.1 = 10%）
- *   IP_SOURCE（可选）     — IP 来源：domain=域名解析(默认) / cidr=CF CIDR扫描 / both=两者合并 / 自定义(CIDR,IP,域名混合)
+ *   IP_SOURCE（可选）     — IP 来源：domain=域名解析(默认) / cidr=CF CIDR扫描 / both=两者合并 / isp=仅三网API / 自定义(CIDR,IP,域名混合)
  *   CIDR_SAMPLES（可选）  — 每个 CIDR 最多采样 IP 数（默认 100）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *   ISP_IP_SOURCE（可选） — 三网优选 IP 源域名（默认 cf.090227.xyz，华为云分线路用）
- *   ISP_IP_PER_LINE（可选）— 每条线路取几个 IP（默认 2）
+ *   ISP_IP_PER_LINE（可选）— 每条线路取几个 IP（默认 2，华为云分线路 A 记录数）
+ *   ISP_IP_POOL_COUNT（可选）— 三网优选 IP 注入测速候选池的数量（每运营商，默认 0=不注入）
  *
  * 用法：
  *   node scripts/sync-dns.js             # 执行同步+检验+测速
@@ -71,12 +72,15 @@ const COLO_FILTER = process.env.COLO_FILTER
 const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '10', 10), 1), 20);
 // 丢包率上限，超过则过滤（默认 0.1 = 10%）
 const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.1');
-// IP 来源模式：domain / cidr / both / 自定义字符串
+// IP 来源模式：domain / cidr / both / isp(仅三网API) / 自定义字符串
 const IP_SOURCE = process.env.IP_SOURCE || 'domain';
 // 每个 CIDR 最多采样 IP 数
 const CIDR_SAMPLES = parseInt(process.env.CIDR_SAMPLES || '100', 10);
 // cfIpTop20 补充开关（默认关闭，设为 1 开启）
 const ENABLE_CF_TOP20 = process.env.ENABLE_CF_TOP20 === '1';
+// 三网优选 IP 注入测速候选池的数量（每运营商），0=不注入
+// 与 ISP_IP_PER_LINE（华为云分线路记录数）独立，这里用于扩大测速候选面
+const ISP_IP_POOL_COUNT = parseInt(process.env.ISP_IP_POOL_COUNT || '0', 10);
 
 // ── IP 质量检测 ──────────────────────────────────────
 
@@ -510,7 +514,8 @@ async function buildIpPool(testHost, needCount) {
 
   const useDomain = IP_SOURCE === 'domain' || IP_SOURCE === 'both';
   const useCidr = IP_SOURCE === 'cidr' || IP_SOURCE === 'both';
-  const isCustom = !['domain', 'cidr', 'both'].includes(IP_SOURCE);
+  const useIsp = IP_SOURCE === 'isp';
+  const isCustom = !['domain', 'cidr', 'both', 'isp'].includes(IP_SOURCE);
 
   if (isCustom) {
     // 自定义模式：解析用户输入的 CIDR/IP/域名混合
@@ -556,6 +561,34 @@ async function buildIpPool(testHost, needCount) {
         }
       }
       console.log(`    CIDR 采样: ${cidrIps.length} 个，新增 ${rawIps.size - before} 个（去重后）`);
+    }
+  }
+
+  // ── 三网优选 IP 注入 ──
+  // isp 模式：仅从三网 API 获取 IP（ISP_IP_POOL_COUNT 为 0 时用 ISP_IP_PER_LINE 兜底）
+  // 其他模式：ISP_IP_POOL_COUNT > 0 时无条件注入三网 IP 到候选池一起测，仅去重
+  const ispPoolCount = useIsp
+    ? (ISP_IP_POOL_COUNT > 0 ? ISP_IP_POOL_COUNT : ISP_IP_PER_LINE)
+    : ISP_IP_POOL_COUNT;
+  if (ispPoolCount > 0) {
+    console.log(`\n  [1c] 从三网 API 拉取优选 IP（每运营商 ${ispPoolCount} 个）...`);
+    try {
+      const ispIps = await fetchIspIps(ispPoolCount);
+      const before = rawIps.size;
+      const lines = [
+        { key: 'telecom', label: '电信' },
+        { key: 'unicom', label: '联通' },
+        { key: 'mobile',  label: '移动' },
+      ];
+      for (const l of lines) {
+        for (const ip of ispIps[l.key]) {
+          if (!sc.is1034Ip(ip)) rawIps.add(ip);
+        }
+        console.log(`    ${l.label}: ${ispIps[l.key].length} 个 → 已加入候选池`);
+      }
+      console.log(`    三网注入后候选池: ${rawIps.size} 个（新增 ${rawIps.size - before}）`);
+    } catch (e) {
+      console.log(`    三网 IP 拉取失败: ${e.message}，继续用现有候选`);
     }
   }
 
@@ -792,6 +825,14 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
     for (let j = 0; j < ipPerZone; j++) {
       const idx = (offset + j) % poolLen;
       ips.push(ipPool[idx].ip);
+    }
+
+    // 去重：池不足时可能产生重复 IP，CF 创建重复 A 记录会报错
+    const uniqueIps = [...new Set(ips)];
+    if (uniqueIps.length < ips.length) {
+      // 保留去重后的列表（不补凑，避免创建重复记录）
+      ips.length = 0;
+      ips.push(...uniqueIps);
     }
 
     for (const name of zone.names) {

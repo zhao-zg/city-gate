@@ -409,18 +409,36 @@ async function getDnsRecords(zoneId, fqdn) {
  */
 async function createARecord(zoneId, name, ips, options = {}) {
   const { line, ttl = 300 } = options;
+  const ipArray = Array.isArray(ips) ? ips : [ips];
   const bodyObj = {
     name: name + '.', // 华为云要求完整 FQDN 带尾部点号
     type: 'A',
     ttl,
-    records: Array.isArray(ips) ? ips : [ips],
+    records: ipArray,
   };
   // 仅当指定了非默认线路时才传 line 字段
   if (line && line !== 'default_view') {
     bodyObj.line = line;
   }
   const body = JSON.stringify(bodyObj);
-  await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
+  try {
+    await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
+  } catch (err) {
+    // 分线路创建失败（如 NS 未切换到华为云、Zone 不支持该线路），
+    // 自动降级为默认线路重试
+    if (line && line !== 'default_view' && err.message && err.message.includes('does not exist')) {
+      const fallbackBody = JSON.stringify({
+        name: name + '.',
+        type: 'A',
+        ttl,
+        records: ipArray,
+        // 不传 line 字段 = 默认线路
+      });
+      await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, fallbackBody);
+    } else {
+      throw err;
+    }
+  }
 }
 
 /**
