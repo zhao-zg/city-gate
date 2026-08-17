@@ -4,31 +4,37 @@
  *
  * 在 Cloudflare 上为华为云 DNS 托管的 zone 的子域名创建 NS 委托记录。
  *
- * 为什么需要：
- *   zzgxxx.eu.org 整体 NS 托管在 Cloudflare。
- *   要将子域名 DNS 解析切到华为云，需要在 CF 的 Zone 下为每个子域名
- *   创建 NS 记录指向华为云 NS 服务器（子域名 NS 委托 / Subdomain Delegation）。
- *   NS 委托后，该子域名的 DNS 解析由华为云负责，A 记录在华为云管理。
+ * 前置条件：
+ *   setup-pages-domains.js 必须先运行完成，且 Pages 自定义域名状态已变 active。
+ *   即 CF DNS 上已有 CNAME(proxied=true) → pages.dev，Pages 自定义域名 SSL 证书已签发。
  *
  * 做什么：
- *   1. 从 wrangler.toml 提取 dnsProvider=huaweicloud 的 zone 及其子域名
+ *   1. 验证所有 Pages 子域名的自定义域名状态为 active（SSL 证书已签发）
  *   2. 在 CF 上为每个子域名创建 4 条 NS 记录指向华为云 NS 服务器
- *   3. 删除 CF 上这些子域名的旧 A 记录（避免解析冲突：CF A 记录 vs 华为云 A 记录）
- *   4. 已存在且正确的 NS 记录跳过（幂等）
+ *   3. 不删除 CNAME 记录（CNAME 保留在 CF DNS 中，NS 委托后华为云 DNS 接管解析）
+ *   4. 已存在且完整的 NS 记录跳过（幂等）
+ *
+ * 为什么不删除 CNAME：
+ *   NS 委托后，该子域名的 DNS 解析由华为云负责（华为云 A 记录指向 CF Anycast IP）。
+ *   CF 上保留的 CNAME 不影响解析——递归解析器看到 NS 记录后会向华为云查询，
+ *   不会查询 CF 上的 CNAME。保留 CNAME 是为了：
+ *     - 如果将来需要回退（删除 NS 委托），CF 上的 CNAME 仍在，可立即恢复 Pages 路由
+ *     - Pages 自定义域名需要 CNAME 存在才能保持验证状态
  *
  * 注意事项：
  *   - NS 委托是 Zone 级操作，在 CF Zone 的 DNS 记录中添加 NS 类型记录
  *   - NS 记录的 name 是子域名（如 sg.zzgxxx.eu.org），content 是 NS 服务器
- *   - 删除旧 A 记录必须同批完成，否则 CF 会优先返回 A 记录（不委托）
  *   - NS 委托后 DNS 传播需要时间（TTL 依赖 CF Zone 的 NS 记录 TTL）
  *
  * 环境变量：
- *   CLOUDFLARE_API_TOKEN — CF API Token（需 Zone > DNS > Edit 权限）
+ *   CLOUDFLARE_API_TOKEN — CF API Token（需 Zone > DNS > Edit + Account > Cloudflare Pages > Read 权限）
  *   DRY_RUN（可选）      — 设为 1 则只预览不执行
+ *   SKIP_VERIFY（可选）  — 设为 1 则跳过 Pages 自定义域名状态验证（调试用）
  *
  * 用法：
  *   node scripts/setup-ns-delegation.js
  *   DRY_RUN=1 node scripts/setup-ns-delegation.js
+ *   SKIP_VERIFY=1 node scripts/setup-ns-delegation.js
  */
 
 const sc = require('./sync-cname');
@@ -44,6 +50,7 @@ const HW_NS_SERVERS = [
 ];
 
 const dryRun = process.env.DRY_RUN === '1';
+const skipVerify = process.env.SKIP_VERIFY === '1';
 
 // ── CF API 封装 ──────────────────────────────────────
 
@@ -69,6 +76,39 @@ async function cfFetch(path, options = {}) {
     throw new Error(`Cloudflare API 错误: ${err} (path: ${path})`);
   }
   return json;
+}
+
+// ── Account ID 获取 ──────────────────────────────────
+
+let _accountId = null;
+
+async function getAccountId() {
+  if (_accountId) return _accountId;
+  const zoneMap = sc.autoDetectZoneMap();
+  for (const zone of zoneMap) {
+    if (sc.zoneDnsProvider(zone) !== sc.DNS_PROVIDER_CF) continue;
+    try {
+      const json = await cfFetch(`/zones?name=${zone.zoneName}`);
+      if (json.result?.[0]?.account?.id) {
+        _accountId = json.result[0].account.id;
+        console.log(`  Account ID: ${_accountId} (from zone ${zone.zoneName})`);
+        return _accountId;
+      }
+    } catch (_) { /* 忽略 */ }
+  }
+  const json = await cfFetch('/accounts');
+  if (json.result?.[0]?.id) {
+    _accountId = json.result[0].id;
+    return _accountId;
+  }
+  throw new Error('无法获取 Account ID，请检查 Token 权限');
+}
+
+// ── Pages 自定义域名状态查询 ──────────────────────────
+
+async function listPagesDomains(accountId, projectName) {
+  const json = await cfFetch(`/accounts/${accountId}/pages/projects/${projectName}/domains`);
+  return json.result || [];
 }
 
 // ── 主逻辑 ──────────────────────────────────────────
@@ -99,16 +139,89 @@ async function main() {
   }
   console.log(`  华为云 DNS zone: ${hwZones.map(z => z.zoneName).join(', ')}`);
 
+  // Step 2: 提取 prefix → pages_project 映射（用于验证 Pages 自定义域名状态）
+  const fs = require('fs');
+  const path = require('path');
+  const workersDir = path.join(__dirname, '..', 'workers');
+  const prefixToPages = new Map();
+  const prefixToOrigin = new Map();
+
+  const dirs = fs.readdirSync(workersDir)
+    .filter(name => fs.existsSync(path.join(workersDir, name, 'wrangler.toml')));
+
+  for (const dir of dirs) {
+    const tomlText = fs.readFileSync(path.join(workersDir, dir, 'wrangler.toml'), 'utf8');
+    const config = sc.parseDomainConfig(tomlText);
+    if (!config || !config.groups) continue;
+
+    for (const group of config.groups) {
+      const zones = group.zones || config.zones;
+      for (const zone of zones) {
+        const zoneName = sc.zoneNameOf(zone);
+        if (!zoneName) continue;
+        if (sc.zoneDnsProvider(zone) !== sc.DNS_PROVIDER_HW) continue;
+        if (group.pages_project) {
+          prefixToPages.set(group.prefix, { pages_project: group.pages_project, zone_name: zoneName });
+        } else if (group.origin) {
+          prefixToOrigin.set(group.prefix, { origin: group.origin, zone_name: zoneName });
+        }
+      }
+    }
+  }
+
+  // Step 3: 验证 Pages 自定义域名状态（除非 SKIP_VERIFY）
+  if (!skipVerify && prefixToPages.size > 0) {
+    console.log('\n── 验证 Pages 自定义域名状态 ──');
+    const accountId = await getAccountId();
+
+    let allActive = true;
+    let pendingList = [];
+
+    for (const [prefix, info] of prefixToPages) {
+      const fqdn = `${prefix}.${info.zone_name}`;
+      try {
+        const domains = await listPagesDomains(accountId, info.pages_project);
+        const domain = domains.find(d => d.name === fqdn);
+        if (!domain) {
+          console.log(`  ✗ ${fqdn}: Pages 自定义域名不存在（请先运行 setup-pages-domains.js）`);
+          allActive = false;
+          pendingList.push(fqdn);
+        } else if (domain.status === 'active') {
+          console.log(`  ✓ ${fqdn}: active`);
+        } else {
+          console.log(`  ⏳ ${fqdn}: ${domain.status || 'pending'}（SSL 证书签发中）`);
+          allActive = false;
+          pendingList.push(fqdn);
+        }
+      } catch (e) {
+        console.log(`  ⚠ ${fqdn}: 查询失败 (${e.message})，继续处理`);
+      }
+    }
+
+    if (!allActive) {
+      console.log(`\n  ⚠ 有 ${pendingList.length} 个子域名的 Pages 自定义域名尚未 active:`);
+      console.log(`    ${pendingList.join(', ')}`);
+      console.log('  SSL 证书签发通常需要几分钟到几小时。');
+      console.log('  请等待状态变 active 后重新运行本脚本。');
+      console.log('  或设置 SKIP_VERIFY=1 跳过验证（不推荐）。');
+      process.exit(1);
+    }
+    console.log('  全部 Pages 自定义域名状态为 active');
+  } else if (skipVerify) {
+    console.log('\n  ⚠ SKIP_VERIFY=1，跳过 Pages 自定义域名状态验证');
+  }
+
+  // Step 4: 创建 NS 委托记录
+  console.log('\n── NS 委托配置 ──');
   let totalNsCreated = 0;
   let totalNsSkipped = 0;
-  let totalADeleted = 0;
   let totalErrors = 0;
 
   for (const zone of hwZones) {
     const zoneName = zone.zoneName;
     console.log(`\n━━━ Zone: ${zoneName} ━━━`);
 
-    // 获取 CF Zone ID（华为云 zone 的 NS 委托在 CF Zone 上操作，需要 CF Zone ID）
+    // 获取 CF Zone ID
     let zoneId;
     try {
       zoneId = await sc.getZoneId(zoneName, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
@@ -127,38 +240,18 @@ async function main() {
         // 查询该 FQDN 的所有 DNS 记录
         const records = await sc.getDnsRecords(zoneId, fqdn, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
 
-        // 分类：现有 NS 记录、A 记录、其他
+        // 分类：现有 NS 记录、CNAME 记录、其他
         const nsRecords = records.filter(r => r.type === 'NS');
-        const aRecords = records.filter(r => r.type === 'A');
-        const otherRecords = records.filter(r => r.type !== 'NS' && r.type !== 'A');
+        const cnameRecords = records.filter(r => r.type === 'CNAME');
 
-        // Step A: 删除旧 A 记录（避免与华为云 A 记录冲突）
-        // NS 委托后，该子域名的解析应由华为云负责。
-        // 如果 CF 上还保留 A 记录，CF 会直接返回 A 记录（不委托到华为云），
-        // 导致解析仍在 CF。必须删除 A 记录，只保留 NS 记录。
-        if (aRecords.length > 0) {
-          console.log(`    删除 ${aRecords.length} 条旧 A 记录:`);
-          for (const rec of aRecords) {
-            console.log(`      A ${fqdn} → ${rec.content} (id: ${rec.id})`);
-            if (!dryRun) {
-              await sc.deleteDnsRecord(zoneId, rec.id, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
-            }
-            totalADeleted++;
+        // 报告 CNAME 状态（不删除，只提示）
+        if (cnameRecords.length > 0) {
+          for (const rec of cnameRecords) {
+            console.log(`    ℹ 保留 CNAME → ${rec.content} (proxied=${rec.proxied})`);
           }
         }
 
-        // 删除其他非 NS 记录（如 CNAME）
-        if (otherRecords.length > 0) {
-          console.log(`    删除 ${otherRecords.length} 条其他记录:`);
-          for (const rec of otherRecords) {
-            console.log(`      ${rec.type} ${fqdn} → ${rec.content} (id: ${rec.id})`);
-            if (!dryRun) {
-              await sc.deleteDnsRecord(zoneId, rec.id, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
-            }
-          }
-        }
-
-        // Step B: 创建/检查 NS 记录
+        // 创建/检查 NS 记录
         const existingNs = new Set(nsRecords.map(r => r.content.toLowerCase().replace(/\.$/, '')));
         const neededNs = HW_NS_SERVERS.filter(ns => !existingNs.has(ns.toLowerCase()));
 
@@ -170,7 +263,7 @@ async function main() {
           if (nsRecords.length > 0 && neededNs.length > 0) {
             console.log(`    补充 ${neededNs.length} 条缺失的 NS 记录（已有 ${nsRecords.length} 条）`);
           } else if (nsRecords.length > 0) {
-            console.log(`    NS 记录已完整但数量不一致，补充中`);
+            console.log(`    NS 记录已存在但数量不一致，补充中`);
           }
 
           for (const ns of neededNs) {
@@ -206,7 +299,7 @@ async function main() {
   // 汇总
   console.log('\n━━━ 汇总 ━━━');
   console.log(`  NS 记录: 创建 ${totalNsCreated}  跳过 ${totalNsSkipped}`);
-  console.log(`  A 记录删除: ${totalADeleted}`);
+  console.log(`  CNAME 记录: 全部保留（未删除）`);
   console.log(`  错误: ${totalErrors}`);
 
   if (totalErrors > 0) {
@@ -216,6 +309,7 @@ async function main() {
   console.log('\n  NS 委托配置完成。DNS 传播需要几分钟到数小时。');
   console.log('  可用以下命令验证子域名是否走华为云解析:');
   console.log('    dig sg.zzgxxx.eu.org NS');
+  console.log('    nslookup sg.zzgxxx.eu.org 8.8.8.8');
 }
 
 if (require.main === module) {
