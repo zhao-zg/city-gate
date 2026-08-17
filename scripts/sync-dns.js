@@ -313,7 +313,11 @@ const SSL_KEEPALIVE_NAME = '_ssl';
  * _ssl.{zone} 指向 192.0.2.1（文档保留 IP，CF 允许 proxied 记录指向它），
  * proxied=true 且不占业务流量。
  *
- * @param {Array} fqdnList - FQDN 列表
+ * 注意：仅适用于 DNS 托管在 Cloudflare 的 Zone。
+ * 华为云 DNS 的 Zone，SSL 证书由 CF for SaaS DCV 验证签发，
+ * 不需要 _ssl 保底记录。
+ *
+ * @param {Array} fqdnList - FQDN 列表（含 dnsProvider 字段）
  * @returns {Array} 缺证书的 Zone 列表（空 = 全部正常）
  */
 async function ensureSslCerts(fqdnList) {
@@ -324,7 +328,7 @@ async function ensureSslCerts(fqdnList) {
   for (const f of fqdnList) {
     if (f.noPreferred && !f.origin) continue;
     if (!zoneMap[f.zoneName]) {
-      zoneMap[f.zoneName] = { tokenKey: f.tokenKey, fqdns: [] };
+      zoneMap[f.zoneName] = { tokenKey: f.tokenKey, dnsProvider: f.dnsProvider || 'cloudflare', fqdns: [] };
     }
     zoneMap[f.zoneName].fqdns.push(f.fqdn);
   }
@@ -333,6 +337,11 @@ async function ensureSslCerts(fqdnList) {
   console.log('\n── 检测 SSL 证书状态 ──');
   const missingZones = [];
   for (const [zoneName, group] of Object.entries(zoneMap)) {
+    // 华为云 DNS 的 Zone 跳过 _ssl 保底（CF 专属机制）
+    if (group.dnsProvider === 'huaweicloud') {
+      console.log(`  ⊘ ${zoneName} — [华为云DNS] 跳过 _ssl 保底（非 CF 托管）`);
+      continue;
+    }
     const testFqdn = group.fqdns[0];
     const hasCert = await checkSslCert(testFqdn);
     if (hasCert) {
@@ -787,6 +796,7 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
         zoneName: zone.zoneName,
         name,
         tokenKey: zone.tokenKey,
+        dnsProvider: zone.dnsProvider || 'cloudflare',
         ips,
       });
     }
@@ -806,6 +816,7 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
         zoneName: zone.zoneName,
         name,
         tokenKey: zone.tokenKey,
+        dnsProvider: zone.dnsProvider || 'cloudflare',
         direct: true,
         target: origin,
       });
@@ -815,28 +826,18 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   return assignments;
 }
 
-// ── DNS 记录操作 ─────────────────────────────────────
+// ── DNS 记录操作（通过 sync-cname 的 provider 路由层）──
 
-async function createARecord(zoneId, name, ip, tokenKey) {
-  const body = { type: 'A', name, content: ip, proxied: false, ttl: 1 };
-  await sc.cfFetch(`/zones/${zoneId}/dns_records`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    tokenKey,
-  });
+async function createARecord(zoneId, name, ip, tokenKey, dnsProvider) {
+  return sc.createARecord(zoneId, name, ip, tokenKey, dnsProvider);
 }
 
-async function createCnameRecord(zoneId, name, target, tokenKey) {
-  const body = { type: 'CNAME', name, content: target, proxied: false, ttl: 1 };
-  await sc.cfFetch(`/zones/${zoneId}/dns_records`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    tokenKey,
-  });
+async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider) {
+  return sc.createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, false);
 }
 
-async function deleteDnsRecord(zoneId, recordId, tokenKey) {
-  await sc.cfFetch(`/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE', tokenKey });
+async function deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider) {
+  return sc.deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider);
 }
 
 // ── 分配计划打印 ─────────────────────────────────────
@@ -879,7 +880,7 @@ async function processARecords(assignments) {
   const zoneGroups = {};
   for (const a of assignments) {
     if (!zoneGroups[a.zoneName]) {
-      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, items: [] };
+      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, dnsProvider: a.dnsProvider || 'cloudflare', items: [] };
     }
     zoneGroups[a.zoneName].items.push(a);
   }
@@ -888,11 +889,13 @@ async function processARecords(assignments) {
 
   for (const [zoneName, group] of Object.entries(zoneGroups)) {
     const tokenKey = group.tokenKey;
-    console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''} ━━━`);
+    const dnsProvider = group.dnsProvider;
+    const provTag = dnsProvider === 'huaweicloud' ? ' [华为云DNS]' : '';
+    console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''}${provTag} ━━━`);
 
     let zoneId;
     try {
-      zoneId = await sc.getZoneId(zoneName, tokenKey);
+      zoneId = await sc.getZoneId(zoneName, tokenKey, dnsProvider);
     } catch (e) {
       console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
       totalStats.errors += group.items.length;
@@ -905,7 +908,7 @@ async function processARecords(assignments) {
       if (a.direct) {
         console.log(`\n  ▸ ${fqdn} → [源站] ${a.target}`);
         try {
-          const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey);
+          const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, dnsProvider);
           const cnameRecords = records.filter(r => r.type === 'CNAME');
           const matchTarget = cnameRecords.filter(r => r.content === a.target);
 
@@ -915,11 +918,11 @@ async function processARecords(assignments) {
           } else {
             for (const rec of records) {
               console.log(`    删除旧记录 ${rec.type} → ${rec.content} (id: ${rec.id})`);
-              if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+              if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
               totalStats.deleted++;
             }
             console.log(`    创建 CNAME → ${a.target}`);
-            if (!dryRun) await createCnameRecord(zoneId, fqdn, a.target, tokenKey);
+            if (!dryRun) await createCnameRecord(zoneId, fqdn, a.target, tokenKey, dnsProvider);
             totalStats.created++;
           }
         } catch (e) {
@@ -934,7 +937,7 @@ async function processARecords(assignments) {
       console.log(`\n  ▸ ${fqdn} → [A] ${targetIps.join(', ')}`);
 
       try {
-        const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey);
+        const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, dnsProvider);
         const aRecords = records.filter(r => r.type === 'A');
         const cnameRecords = records.filter(r => r.type === 'CNAME');
         const otherRecords = records.filter(r => r.type !== 'A' && r.type !== 'CNAME');
@@ -942,7 +945,7 @@ async function processARecords(assignments) {
         // 删除非 A 记录
         for (const rec of [...cnameRecords, ...otherRecords]) {
           console.log(`    删除 ${rec.type} 记录 → ${rec.content} (id: ${rec.id})`);
-          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
           totalStats.deleted++;
         }
 
@@ -956,13 +959,13 @@ async function processARecords(assignments) {
 
         for (const rec of toDelete) {
           console.log(`    删除 A 记录 → ${rec.content} (id: ${rec.id})`);
-          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
           totalStats.deleted++;
         }
 
         for (const ip of toCreate) {
           console.log(`    创建 A 记录 → ${ip}`);
-          if (!dryRun) await createARecord(zoneId, fqdn, ip, tokenKey);
+          if (!dryRun) await createARecord(zoneId, fqdn, ip, tokenKey, dnsProvider);
           totalStats.created++;
         }
 
@@ -1009,7 +1012,12 @@ async function main() {
 
   const poolZones = filteredZones.filter(z => !z.noPreferred);
   const noPrefZones = filteredZones.filter(z => z.noPreferred);
+  const hwZones = filteredZones.filter(z => z.dnsProvider === 'huaweicloud');
+  const cfZones = filteredZones.filter(z => z.dnsProvider !== 'huaweicloud');
   console.log(`  共 ${filteredZones.length} 个 Zone（使用 A 记录: ${poolZones.length}，直连源站: ${noPrefZones.length}）`);
+  if (hwZones.length > 0) {
+    console.log(`  DNS Provider: Cloudflare ${cfZones.length} / 华为云 ${hwZones.length} (${hwZones.map(z => z.zoneName).join(', ')})`);
+  }
 
   const testHost = sc.buildTestHost(filteredZones);
   if (!testHost) {
@@ -1278,6 +1286,7 @@ async function main() {
         fqdn: `${prefix}.${zone.zoneName}`,
         zoneName: zone.zoneName,
         tokenKey: zone.tokenKey,
+        dnsProvider: zone.dnsProvider || 'cloudflare',
         noPreferred: zone.noPreferred || false,
         origin: (zone.origins && zone.origins[prefix]) || null,
       });
@@ -1305,16 +1314,17 @@ async function main() {
   const zoneGroups = {};
   for (const f of fqdnList) {
     if (!zoneGroups[f.zoneName]) {
-      zoneGroups[f.zoneName] = { tokenKey: f.tokenKey, items: [] };
+      zoneGroups[f.zoneName] = { tokenKey: f.tokenKey, dnsProvider: f.dnsProvider || 'cloudflare', items: [] };
     }
     zoneGroups[f.zoneName].items.push(f);
   }
 
   for (const [zoneName, group] of Object.entries(zoneGroups)) {
-    console.log(`\n  Zone: ${zoneName}`);
+    const provTag = group.dnsProvider === 'huaweicloud' ? ' [华为云DNS]' : '';
+    console.log(`\n  Zone: ${zoneName}${provTag}`);
     let zoneId;
     try {
-      zoneId = await sc.getZoneId(zoneName, group.tokenKey);
+      zoneId = await sc.getZoneId(zoneName, group.tokenKey, group.dnsProvider);
     } catch (e) {
       console.error(`    ✗ 获取 Zone ID 失败: ${e.message}`);
       continue;
@@ -1322,12 +1332,12 @@ async function main() {
 
     for (const f of group.items) {
       try {
-        const records = await sc.getDnsRecords(zoneId, f.fqdn, group.tokenKey);
+        const records = await sc.getDnsRecords(zoneId, f.fqdn, group.tokenKey, group.dnsProvider);
         if (records.length === 0) {
           console.log(`    ⚠ ${f.fqdn}: 无 DNS 记录`);
         } else {
           for (const rec of records) {
-            console.log(`    ${f.fqdn}: ${rec.type} → ${rec.content} (proxied=${rec.proxied})`);
+            console.log(`    ${f.fqdn}: ${rec.type} → ${rec.content}${rec.proxied ? ' (proxied)' : ''}`);
           }
           // 收集 proxied=false 的 A 记录 IP，供连通性检测直连
           const aIps = records

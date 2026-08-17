@@ -21,7 +21,7 @@ DOMAIN_CONFIG_JSON = """
   "zones": [
     "1189.dpdns.org",
     "zhaozg.dpdns.org",
-    "zzgxxx.eu.org"
+    { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud" }
   ],
   "groups": [
     {

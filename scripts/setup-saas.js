@@ -28,51 +28,22 @@
 
 const sc = require('./sync-cname');
 
-const CF_API = 'https://api.cloudflare.com/client/v4';
 const dryRun = process.env.DRY_RUN === '1';
 
-// ── 工具函数 ──────────────────────────────────────────
+// ── DNS 记录操作（通过 sync-cname 的 provider 路由层）──
+// setup-saas.js 不再直接调用 CF API，统一走 sc.* 函数，
+// 由 zone 配置的 dnsProvider 决定走 CF 还是华为云
 
-async function cfApi(path, options = {}) {
-  const tokenKey = options.tokenKey || 'default';
-  const token = sc.getToken(tokenKey);
-
-  const { tokenKey: _, ...fetchOptions } = options;
-  const res = await fetch(`${CF_API}${path}`, {
-    ...fetchOptions,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...fetchOptions.headers,
-    },
-  });
-
-  const json = await res.json();
-  if (!json.success) {
-    const err = json.errors?.map(e => e.message).join('; ') || '未知错误';
-    throw new Error(`Cloudflare API 错误: ${err} (path: ${path})`);
-  }
-  return json;
+async function deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider) {
+  return sc.deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider);
 }
 
-// ── DNS 记录操作 ─────────────────────────────────────
-
-async function getDnsRecords(zoneId, name, tokenKey) {
-  const json = await cfApi(`/zones/${zoneId}/dns_records?name=${name}`, { tokenKey });
-  return json.result || [];
+async function createARecord(zoneId, name, ip, tokenKey, dnsProvider) {
+  return sc.createARecord(zoneId, name, ip, tokenKey, dnsProvider);
 }
 
-async function createDnsRecord(zoneId, body, tokenKey) {
-  const json = await cfApi(`/zones/${zoneId}/dns_records`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    tokenKey,
-  });
-  return json.result;
-}
-
-async function deleteDnsRecord(zoneId, recordId, tokenKey) {
-  await cfApi(`/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE', tokenKey });
+async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider) {
+  return sc.createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, false);
 }
 
 // ── 主逻辑 ──────────────────────────────────────────
@@ -92,7 +63,9 @@ async function main() {
   if (zoneMap.length === 0) {
     throw new Error('未检测到任何 Zone 配置，请检查 workers/ 下的 wrangler.toml');
   }
-  console.log(`  共 ${zoneMap.length} 个 Zone\n`);
+    const hwZones = zoneMap.filter(z => sc.zoneDnsProvider(z) === sc.DNS_PROVIDER_HW);
+    const cfZones = zoneMap.filter(z => sc.zoneDnsProvider(z) === sc.DNS_PROVIDER_CF);
+    console.log(`  共 ${zoneMap.length} 个 Zone（Cloudflare ${cfZones.length} / 华为云 ${hwZones.length}${hwZones.length > 0 ? ': ' + hwZones.map(z => z.zoneName).join(', ') : ''}）\n`);
 
   // Step 2: 优选域名池验证
   console.log('\n── 优选域名池验证 ──');
@@ -139,12 +112,14 @@ async function main() {
 
     const zoneName = zone.zoneName;
     const tokenKey = zone.tokenKey || 'default';
+    const dnsProvider = sc.zoneDnsProvider(zone);
+    const provTag = dnsProvider === sc.DNS_PROVIDER_HW ? ' [华为云DNS]' : '';
 
-    console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey}) ━━━`);
+    console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey})${provTag} ━━━`);
 
     let zoneId;
     try {
-      zoneId = await sc.getZoneId(zoneName, tokenKey);
+      zoneId = await sc.getZoneId(zoneName, tokenKey, dnsProvider);
     } catch (e) {
       console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
       totalErrors++;
@@ -167,11 +142,11 @@ async function main() {
         }
         console.log(`\n  ▸ ${fqdn} → CNAME ${origin} (proxied=false)`);
         try {
-          const records = await getDnsRecords(zoneId, fqdn, tokenKey);
+          const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, dnsProvider);
           // 清理旧 A 记录
           for (const rec of records.filter(r => r.type === 'A')) {
             console.log(`    删除旧 A → ${rec.content}`);
-            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
           }
           // 检查 CNAME
           const matched = records.filter(r => r.type === 'CNAME' && r.content === origin && !r.proxied);
@@ -180,10 +155,10 @@ async function main() {
           } else {
             for (const rec of records.filter(r => r.type === 'CNAME')) {
               console.log(`    删除旧 CNAME → ${rec.content}`);
-              if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+              if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
             }
             console.log(`    创建 CNAME → ${origin}`);
-            if (!dryRun) await createDnsRecord(zoneId, { type: 'CNAME', name: fqdn, content: origin, proxied: false, ttl: 1 }, tokenKey);
+            if (!dryRun) await createCnameRecord(zoneId, fqdn, origin, tokenKey, dnsProvider);
           }
         } catch (e) {
           console.error(`    ✗ 失败: ${e.message}`);
@@ -195,11 +170,11 @@ async function main() {
       // 正常 zone: A 记录 → 优选 IP (proxied=false)
       console.log(`\n  ▸ ${fqdn} → A ${preferredIp} (proxied=false)`);
       try {
-        const records = await getDnsRecords(zoneId, fqdn, tokenKey);
+        const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, dnsProvider);
         // 清理旧 CNAME（SaaS 遗留）
         for (const rec of records.filter(r => r.type === 'CNAME')) {
           console.log(`    删除旧 CNAME → ${rec.content}`);
-          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+          if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
         }
         // 检查 A 记录
         const matched = records.filter(r => r.type === 'A' && r.content === preferredIp && !r.proxied);
@@ -208,10 +183,10 @@ async function main() {
         } else {
           for (const rec of records.filter(r => r.type === 'A')) {
             console.log(`    删除旧 A → ${rec.content}`);
-            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey);
+            if (!dryRun) await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
           }
           console.log(`    创建 A 记录 → ${preferredIp}`);
-          if (!dryRun) await createDnsRecord(zoneId, { type: 'A', name: fqdn, content: preferredIp, proxied: false, ttl: 1 }, tokenKey);
+          if (!dryRun) await createARecord(zoneId, fqdn, preferredIp, tokenKey, dnsProvider);
         }
       } catch (e) {
         console.error(`    ✗ 失败: ${e.message}`);

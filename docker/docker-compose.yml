@@ -47,6 +47,11 @@ services:
       - ZONE_CONFIG_JSON=${ZONE_CONFIG_JSON:-}
       # ── cfIpTop20 补充开关（默认关闭，设为 1 开启） ──
       - ENABLE_CF_TOP20=${ENABLE_CF_TOP20:-}
+      # ── 华为云 DNS（可选，zone 配置 dnsProvider=huaweicloud 时需要） ──
+      # 认证方式：AK/SK 签名（SDK-HMAC-SHA256）
+      - HUAWEICLOUD_DNS_AK=${HUAWEICLOUD_DNS_AK:-}
+      - HUAWEICLOUD_DNS_SK=${HUAWEICLOUD_DNS_SK:-}
+      - HUAWEICLOUD_DNS_ENDPOINT=${HUAWEICLOUD_DNS_ENDPOINT:-https://dns.myhuaweicloud.com}
     volumes:
       # 持久化日志
       - ./logs:/var/log/city-gate

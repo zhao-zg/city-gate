@@ -35,6 +35,14 @@ const https = require('https');
 const http = require('http');
 const path = require('path');
 
+// ── 华为云 DNS 客户端（按需加载，未配置时不报错）──
+let hwDns = null;
+try {
+  hwDns = require('./dns-huaweicloud');
+} catch (_) {
+  // 模块不存在时忽略，仅在 zone 配置了 dnsProvider=huaweicloud 时才需要
+}
+
 // ── 短命请求用 Agent：关闭 keep-alive，用完立即释放 TCP 连接 ──
 const _noKeepAliveAgent = new https.Agent({ keepAlive: false });
 
@@ -44,6 +52,32 @@ const WORKER_TOKEN_KEYS = {
   'city-gate': 'default',
   'city-gate-2': 'account2',
 };
+
+// ── DNS Provider 路由层 ─────────────────────────────────
+// zone 配置可选 dnsProvider 字段：'cloudflare'（默认）/ 'huaweicloud'
+// 非 CF provider 的 zone，DNS 记录操作走对应云厂商 API
+// A 记录仍指向 CF Anycast 优选 IP，只是 DNS 托管在华为云
+const DNS_PROVIDER_CF = 'cloudflare';
+const DNS_PROVIDER_HW = 'huaweicloud';
+
+/**
+ * 从 zone 对象提取 dnsProvider
+ * 支持配置写法：{ "name": "example.com", "dnsProvider": "huaweicloud" }
+ * 默认 'cloudflare'
+ */
+function zoneDnsProvider(zone) {
+  if (typeof zone === 'object' && zone !== null && zone.dnsProvider) {
+    return zone.dnsProvider;
+  }
+  return DNS_PROVIDER_CF;
+}
+
+/**
+ * 判断 zone 的 DNS 是否由 Cloudflare 管理
+ */
+function isCfDnsZone(zone) {
+  return zoneDnsProvider(zone) === DNS_PROVIDER_CF;
+}
 
 // ── 优选域名池 ─────────────────────────────────────────
 // 每个 zone 分配池中一个域名，zone 内所有子域名指向同一优选域名
@@ -161,14 +195,17 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         const noPreferred = isNoPreferredZone(zone);
         // zone 级 tokenKey 覆盖（可选，优先于 config 级 tokenKey）
         const zoneTokenKey = (typeof zone === 'object' && zone.tokenKey) || null;
+        // zone 级 dnsProvider（可选，默认 cloudflare）
+        const zoneDnsProv = (typeof zone === 'object' && zone.dnsProvider) || null;
 
         let info = zoneInfo.get(zoneName);
         if (!info) {
-          info = { noPreferred: false, origins: {}, tokenKey: zoneTokenKey };
+          info = { noPreferred: false, origins: {}, tokenKey: zoneTokenKey, dnsProvider: zoneDnsProv || DNS_PROVIDER_CF };
           zoneInfo.set(zoneName, info);
         }
         if (noPreferred) info.noPreferred = true;
         if (zoneTokenKey) info.tokenKey = zoneTokenKey;
+        if (zoneDnsProv) info.dnsProvider = zoneDnsProv;
 
         // noPreferred zone 需要记录每个前缀对应的源站（CNAME 直连目标）
         if (info.noPreferred && group.origin) {
@@ -183,6 +220,7 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         zoneName,
         names,
         tokenKey: info.tokenKey || tokenKey,
+        dnsProvider: info.dnsProvider || DNS_PROVIDER_CF,
         ...(info.noPreferred ? { noPreferred: true, origins: info.origins } : {}),
       });
     }
@@ -820,7 +858,19 @@ async function cfFetch(path, options = {}) {
   return json;
 }
 
-async function getZoneId(zoneName, tokenKey) {
+// ── DNS 记录操作（多 provider 路由）──────────────────────
+//
+// 根据 dnsProvider 分发到 Cloudflare 或华为云 API
+// 参数 dnsProvider: 'cloudflare'（默认）/ 'huaweicloud'
+// tokenKey 仅 CF provider 使用（多账户 Token 映射）
+// 华为云使用 IAM Token 认证，不依赖 tokenKey
+
+async function getZoneId(zoneName, tokenKey, dnsProvider) {
+  if (dnsProvider === DNS_PROVIDER_HW) {
+    if (!hwDns) throw new Error('华为云 DNS 模块未加载，请检查 dns-huaweicloud.js');
+    return hwDns.getZoneId(zoneName);
+  }
+  // 默认 Cloudflare
   const json = await cfFetch(`/zones?name=${zoneName}`, { tokenKey });
   if (!json.result?.length) {
     throw new Error(`Zone "${zoneName}" 未找到，请检查 zone 名称和 API Token 权限`);
@@ -828,17 +878,47 @@ async function getZoneId(zoneName, tokenKey) {
   return json.result[0].id;
 }
 
-async function getDnsRecords(zoneId, recordName, tokenKey) {
+async function getDnsRecords(zoneId, recordName, tokenKey, dnsProvider) {
+  if (dnsProvider === DNS_PROVIDER_HW) {
+    return hwDns.getDnsRecords(zoneId, recordName);
+  }
+  // 默认 Cloudflare
   const json = await cfFetch(`/zones/${zoneId}/dns_records?name=${recordName}`, { tokenKey });
   return json.result || [];
 }
 
-async function deleteDnsRecord(zoneId, recordId, tokenKey) {
+async function deleteDnsRecord(zoneId, recordId, tokenKey, dnsProvider) {
+  if (dnsProvider === DNS_PROVIDER_HW) {
+    return hwDns.deleteDnsRecord(zoneId, recordId);
+  }
+  // 默认 Cloudflare
   await cfFetch(`/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE', tokenKey });
 }
 
-async function createCnameRecord(zoneId, name, target, tokenKey, proxied = false) {
+async function createCnameRecord(zoneId, name, target, tokenKey, dnsProvider, proxied = false) {
+  if (dnsProvider === DNS_PROVIDER_HW) {
+    return hwDns.createCnameRecord(zoneId, name, target);
+  }
+  // 默认 Cloudflare
   const body = { type: 'CNAME', name, content: target, proxied, ttl: 1 };
+  await cfFetch(`/zones/${zoneId}/dns_records`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    tokenKey,
+  });
+}
+
+/**
+ * 创建 A 记录（多 provider）
+ * CF: 一条 A 记录一个 IP（多 IP = 多条 A 记录）
+ * 华为云: 一条 recordset 一个 IP（与 CF 保持一致的粒度，方便增量同步）
+ */
+async function createARecord(zoneId, name, ip, tokenKey, dnsProvider) {
+  if (dnsProvider === DNS_PROVIDER_HW) {
+    return hwDns.createARecord(zoneId, name, ip);
+  }
+  // 默认 Cloudflare
+  const body = { type: 'A', name, content: ip, proxied: false, ttl: 1 };
   await cfFetch(`/zones/${zoneId}/dns_records`, {
     method: 'POST',
     body: JSON.stringify(body),
@@ -1146,7 +1226,11 @@ module.exports = {
   stripProtocol,
   zoneNameOf,
   isNoPreferredZone,
+  zoneDnsProvider,
+  isCfDnsZone,
   WORKER_TOKEN_KEYS,
+  DNS_PROVIDER_CF,
+  DNS_PROVIDER_HW,
   resolveIps,
   is1034Ip,
   isChallengePage,
@@ -1163,6 +1247,7 @@ module.exports = {
   getDnsRecords,
   deleteDnsRecord,
   createCnameRecord,
+  createARecord,
   getToken,
   cfFetch,
   CNAME_POOL,

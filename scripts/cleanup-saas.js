@@ -148,8 +148,15 @@ function getPagesProjects() {
 
 // ── 主逻辑 ───────────────────────────────────
 
-async function cleanZone(zoneName, tokenKey) {
-  console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey}) ━━━`);
+async function cleanZone(zoneName, tokenKey, dnsProvider) {
+  const provTag = dnsProvider === 'huaweicloud' ? ' [华为云DNS]' : '';
+  console.log(`\n━━━ Zone: ${zoneName} (账户: ${tokenKey})${provTag} ━━━`);
+
+  // 华为云 DNS 的 Zone 跳过 SaaS 清理（SaaS 资源是 CF 专属）
+  if (dnsProvider === 'huaweicloud') {
+    console.log(`  ⊘ 华为云 DNS Zone，跳过 SaaS 旧资源清理`);
+    return { errors: 0 };
+  }
 
   let zoneId;
   try {
@@ -321,7 +328,8 @@ async function main() {
   let totalErrors = 0;
   for (const zone of zoneMap) {
     if (filterTokenKey && zone.tokenKey !== filterTokenKey) continue;
-    const result = await cleanZone(zone.zoneName, zone.tokenKey || 'default');
+    const dnsProvider = sc.zoneDnsProvider(zone);
+    const result = await cleanZone(zone.zoneName, zone.tokenKey || 'default', dnsProvider);
     totalErrors += result.errors;
   }
 

@@ -57,5 +57,10 @@ ENV CIDR_SAMPLES="100"
 ENV ZONE_CONFIG_JSON=""
 # cfIpTop20 补充开关（默认关闭，设为 1 开启）
 ENV ENABLE_CF_TOP20=""
+# ── 华为云 DNS（可选，zone 配置 dnsProvider=huaweicloud 时需要）──
+# 认证方式：AK/SK 签名（SDK-HMAC-SHA256）
+ENV HUAWEICLOUD_DNS_AK=""
+ENV HUAWEICLOUD_DNS_SK=""
+ENV HUAWEICLOUD_DNS_ENDPOINT="https://dns.myhuaweicloud.com"
 
 ENTRYPOINT ["/entrypoint.sh"]

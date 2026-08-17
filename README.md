@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '7e0f74fe-828c-47ee-a6fd-fad26df62088'
-  PropagateID: '7e0f74fe-828c-47ee-a6fd-fad26df62088'
-  ReservedCode1: '14d2fea1-e7ce-458a-b609-bd267ed5a7d8'
-  ReservedCode2: '14d2fea1-e7ce-458a-b609-bd267ed5a7d8'
+  ProduceID: 'a7664f31-733d-4a6c-9ebf-7e2df7ed0f1c'
+  PropagateID: 'a7664f31-733d-4a6c-9ebf-7e2df7ed0f1c'
+  ReservedCode1: '0a516a5c-c6b4-4fe6-bbdf-396c54b8ad90'
+  ReservedCode2: '0a516a5c-c6b4-4fe6-bbdf-396c54b8ad90'
 ---
 
 # city-gate
@@ -43,10 +43,12 @@ workers/                     # Worker 代码（保留不部署，可回退）
 └── cxapk/                   # APK 下载页（Pages 托管）
     └── index.html
 scripts/
-├── setup-saas.js            # CF for SaaS 配置（Fallback Origin + Custom Hostnames）
+├── setup-saas.js            # DNS 初始化（优选 IP + A 记录创建）
 ├── setup-firewall.js        # WAF Custom Rules 配置（地理围栏 + 时段控制）
 ├── sync-dns.js              # DNS A 记录同步（Docker 定时执行）
-├── sync-cname.js            # DNS CNAME 同步（CNAME 模式 fallback）
+├── sync-cname.js            # DNS CNAME 同步 + provider 路由层
+├── dns-huaweicloud.js       # 华为云 DNS API 客户端（可选 provider）
+├── cleanup-saas.js          # SaaS 旧资源清理
 ├── check-cname.js           # DNS 记录检测
 ├── generate-routes.js       # Worker 路由生成（回退时使用）
 ├── validate-config.js       # 配置校验
@@ -100,6 +102,26 @@ docker/
 
 - 字符串（默认）：使用优选 IP，`sync-dns.js` 分配 A 记录指向 CF 边缘优选 IP
 - 对象：`{ "name": "zzg.cc.cd", "noPreferred": true }` — 不使用优选 IP，直接 CNAME 到源站
+
+### DNS 托管在华为云（可选）
+
+`zones` 元素支持 `dnsProvider` 字段，将 DNS 记录管理从 Cloudflare 迁移到华为云 DNS：
+
+```json
+{
+  "zones": [
+    "1189.dpdns.org",
+    { "name": "example.com", "dnsProvider": "huaweicloud" }
+  ],
+  "groups": [...]
+}
+```
+
+- 默认 `dnsProvider` 为 `cloudflare`（不写即默认）
+- 设为 `huaweicloud` 后，该 zone 的 A/CNAME 记录通过华为云 DNS API 管理
+- 架构不变：A 记录仍指向 CF Anycast 优选 IP，只是 DNS 记录托管在华为云
+- 华为云 zone 跳过 `_ssl` 保底和 SaaS 旧资源清理（CF 专属机制）
+- 需配置华为云环境变量（见下文）
 
 ## 部署
 
@@ -157,6 +179,14 @@ docker run -d \
 | `CLOUDFLARE_ACCOUNT_ID` | 账户1 Account ID（Pages 部署用） | 是 |
 | `CLOUDFLARE_ACCOUNT_ID_2` | 账户2 Account ID | 否 |
 
+**华为云 DNS（可选）：**
+
+| Secret | 说明 | 是否必须 |
+|--------|------|--------|
+| `HUAWEICLOUD_DNS_AK` | 华为云 Access Key Id | 使用华为云 DNS 时必须 |
+| `HUAWEICLOUD_DNS_SK` | 华为云 Secret Access Key | 使用华为云 DNS 时必须 |
+| `HUAWEICLOUD_DNS_ENDPOINT` | DNS Endpoint（默认 https://dns.myhuaweicloud.com） | 否 |
+
 > 以下 Secrets 仅 Worker 回退模式需要（当前架构不使用）：
 > - `KV_IP2REGION_NAMESPACE_ID` / `KV_IP2REGION_NAMESPACE_ID_2`
 
@@ -181,3 +211,6 @@ docker run -d \
 | `ZONE_CONFIG_JSON` | 覆盖 wrangler.toml 配置 |
 | `IP_PER_ZONE` | 每 zone 分配的 A 记录 IP 数量（默认 2） |
 | `IP_DEDUP_PREFIX` | IP 去重前缀长度（默认 /24） |
+| `HUAWEICLOUD_DNS_AK` | 华为云 Access Key Id（可选） |
+| `HUAWEICLOUD_DNS_SK` | 华为云 Secret Access Key（可选） |
+| `HUAWEICLOUD_DNS_ENDPOINT` | DNS Endpoint（默认 https://dns.myhuaweicloud.com） |
