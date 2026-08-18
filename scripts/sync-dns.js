@@ -871,32 +871,20 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   }
 
   // 华为云 zone：加入 assignment 列表（不分配 CF IP，由 processHwIspRecords 单独处理）
-  // 有 origin 的前缀走 direct 模式（CNAME 直连源站，显式覆盖通配符 A）
+  // 所有前缀（包括有 origin 的，如 answer）都走通配符 A → CF 边缘 IP → Worker 路由转发
+  // 不再为有 origin 的前缀创建显式 CNAME 直连源站，统一由 Worker 路由处理
   for (const zone of zoneMap) {
     if (zone.dnsProvider !== 'huaweicloud' || zone.noPreferred) continue;
     for (const name of zone.names) {
-      const origin = (zone.origins && zone.origins[name]) || null;
-      if (origin) {
-        assignments.push({
-          fqdn: `${name}.${zone.zoneName}`,
-          zoneName: zone.zoneName,
-          name,
-          tokenKey: zone.tokenKey,
-          dnsProvider: 'huaweicloud',
-          direct: true,
-          target: origin,
-        });
-      } else {
-        assignments.push({
-          fqdn: `${name}.${zone.zoneName}`,
-          zoneName: zone.zoneName,
-          name,
-          tokenKey: zone.tokenKey,
-          dnsProvider: 'huaweicloud',
-          // ips 为空，processHwIspRecords 会拉取三网 IP
-          ips: [],
-        });
-      }
+      assignments.push({
+        fqdn: `${name}.${zone.zoneName}`,
+        zoneName: zone.zoneName,
+        name,
+        tokenKey: zone.tokenKey,
+        dnsProvider: 'huaweicloud',
+        // ips 为空，processHwIspRecords 会拉取三网 IP
+        ips: [],
+      });
     }
   }
 
@@ -960,7 +948,8 @@ function printAssignmentPlan(assignments) {
  *   *.zzgxxx.eu.org  A  Yidong    → [移动IP1, 移动IP2]
  *   *.zzgxxx.eu.org  A  default   → [默认IP1, 默认IP2]
  *
- * answer 等源站直连子域名单独显式 CNAME，覆盖通配符
+ * 所有前缀（Pages + 非 Pages 如 answer）统一走通配符 A → CF 边缘 IP → Worker 路由转发
+ * 清理已存在的显式 CNAME/A 记录，避免覆盖通配符
  *
  * @param {Array} hwAssignments — 华为云 zone 的 assignments（含 direct 和非 direct）
  * @param {string} testHost — 1034 真实请求验证用的测试 Host（如 sg.1189.dpdns.org）
@@ -1075,11 +1064,10 @@ async function processHwIspRecords(hwAssignments, testHost) {
       continue;
     }
 
-    // 区分：Pages 子域名（走通配符 A） vs 源站直连（走显式 CNAME）
-    const directItems = group.items.filter((a) => a.direct);
-    const poolItems = group.items.filter((a) => !a.direct);
+    // 所有前缀统一走通配符 A 记录（包括 answer 等非 Pages 前缀，由 Worker 路由转发）
+    const poolItems = group.items;
 
-    // ── 通配符 A 记录：一条 * 记录覆盖所有 Pages 子域名 ──
+    // ── 通配符 A 记录：一条 * 记录覆盖所有前缀 ──
     if (poolItems.length > 0) {
       const wildcardName = `*.${zoneName}`;
       console.log(`\n  ▸ ${wildcardName} → 三网分线路 A 记录`);
@@ -1213,34 +1201,21 @@ async function processHwIspRecords(hwAssignments, testHost) {
       }
     }
 
-    // ── 源站直连 CNAME（answer 等，显式覆盖通配符） ──
-    for (const a of directItems) {
-      const { fqdn, target } = a;
-      console.log(`\n  ▸ ${fqdn} → CNAME ${target} (源站直连，覆盖通配符)`);
+    // 所有前缀统一走通配符 A → CF 边缘 IP → Worker 路由转发
+    // 清理已存在的显式 CNAME/A 记录（如旧 answer CNAME），否则会覆盖通配符 A
+    for (const a of group.items) {
+      const { fqdn } = a;
       try {
         const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, 'huaweicloud');
-        const cnameRecords = records.filter((r) => r.type === 'CNAME');
-        const matched = cnameRecords.filter((r) => r.content === target);
-
-        if (matched.length > 0) {
-          console.log(`    CNAME 已指向 ${target} → 跳过`);
-          totalStats.skipped++;
-        } else {
-          // 删除旧记录（A 记录和旧 CNAME）
+        if (records.length > 0) {
           for (const rec of records) {
-            console.log(`    删除旧 ${rec.type} → ${rec.content} (id: ${rec.id})`);
+            console.log(`  [清理] 删除 ${fqdn} 的显式 ${rec.type} → ${rec.content} (id: ${rec.id})，改由通配符 A 覆盖`);
             if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
             totalStats.deleted++;
           }
-          console.log(`    创建 CNAME → ${target}`);
-          if (!dryRun) {
-            await sc.createCnameRecord(zoneId, fqdn, target, tokenKey, 'huaweicloud', false, {});
-          }
-          totalStats.created++;
         }
       } catch (e) {
-        console.error(`    ✗ 处理失败: ${e.message}`);
-        totalStats.errors++;
+        // 查询失败不阻塞流程（记录可能不存在）
       }
     }
   }
