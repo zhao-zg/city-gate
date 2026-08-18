@@ -224,7 +224,10 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         names,
         tokenKey: info.tokenKey || tokenKey,
         dnsProvider: info.dnsProvider || DNS_PROVIDER_CF,
+        // noPreferred zone: origins 必须传递（CNAME 直连源站）
+        // 非 noPreferred 华为云 zone: origins 也需传递（显式 CNAME 覆盖通配符 A）
         ...(info.noPreferred ? { noPreferred: true, origins: info.origins } : {}),
+        ...(!info.noPreferred && Object.keys(info.origins).length > 0 ? { origins: info.origins } : {}),
       });
     }
     return zones;
