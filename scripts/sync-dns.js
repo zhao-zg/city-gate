@@ -81,6 +81,8 @@ const ENABLE_CF_TOP20 = process.env.ENABLE_CF_TOP20 === '1';
 // 三网优选 IP 注入测速候选池的数量（每运营商），0=不注入
 // 与 ISP_IP_PER_LINE（华为云分线路记录数）独立，这里用于扩大测速候选面
 const ISP_IP_POOL_COUNT = parseInt(process.env.ISP_IP_POOL_COUNT || '0', 10);
+// 每条线路取几个 IP（华为云分线路 A 记录数，与 fetch-isp-ips.js 的 ISP_IP_PER_LINE 一致）
+const ISP_IP_PER_LINE = parseInt(process.env.ISP_IP_PER_LINE || '2', 10);
 
 // ── IP 质量检测 ──────────────────────────────────────
 
