@@ -182,15 +182,12 @@ async function fetchIspIps(perLine = ISP_IP_PER_LINE) {
     }
   }
 
-  // default 线路：从三网各取第一个 IP 拼成去重列表（最多 perLine 个）
+  // default 线路：合并三网所有 IP 去重，作为保底解析
   const defaultCandidates = [];
   for (const ep of endpoints) {
-    if (result[ep.key].length > 0) {
-      defaultCandidates.push(result[ep.key][0]);
-    }
+    defaultCandidates.push(...result[ep.key]);
   }
-  // 去重
-  result.default = [...new Set(defaultCandidates)].slice(0, perLine);
+  result.default = [...new Set(defaultCandidates)];
   console.log(`  默认 (default): ${result.default.length} 个 → ${result.default.join(', ')}`);
 
   return result;
