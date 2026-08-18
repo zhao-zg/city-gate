@@ -890,11 +890,19 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   // 所有前缀（包括有 origin 的，如 answer）都走通配符 A → CF 边缘 IP → Worker 路由转发
   // 不再为有 origin 的前缀创建显式 CNAME 直连源站，统一由 Worker 路由处理
   // ispSources 传递：per-zone 三网分线路域名组（可选，未配则 processHwIspRecords 回退 HTTP API）
+  // 例外：FQDN 等于 origin 主机名时（自引用，如 answer.07170501.xyz → answer.07170501.xyz），
+  //   跳过不处理，保留现有 DNS 记录直连源站，避免 Worker 回源死循环
   for (const zone of zoneMap) {
     if (zone.dnsProvider !== 'huaweicloud' || zone.noPreferred) continue;
     for (const name of zone.names) {
+      const fqdn = `${name}.${zone.zoneName}`;
+      const origin = (zone.origins && zone.origins[name]) || null;
+      if (origin && fqdn === origin) {
+        // 自引用：FQDN 就是源站本身，不需要优选也不需要 Worker 转发，跳过
+        continue;
+      }
       assignments.push({
-        fqdn: `${name}.${zone.zoneName}`,
+        fqdn,
         zoneName: zone.zoneName,
         name,
         tokenKey: zone.tokenKey,
@@ -1732,16 +1740,21 @@ async function main() {
   // ═══════════════════════════════════════════════════
 
   // 构建 FQDN 列表（连通性检测也需要，提前构建）
+  // 自引用 FQDN（FQDN = origin 主机名，如 answer.07170501.xyz）跳过，
+  // 不参与 SSL 证书保底和连通性检测，保留现有 DNS 记录直连源站
   const fqdnList = [];
   for (const zone of filteredZones) {
     for (const prefix of zone.names) {
+      const fqdn = `${prefix}.${zone.zoneName}`;
+      const origin = (zone.origins && zone.origins[prefix]) || null;
+      if (origin && fqdn === origin) continue; // 自引用跳过
       fqdnList.push({
-        fqdn: `${prefix}.${zone.zoneName}`,
+        fqdn,
         zoneName: zone.zoneName,
         tokenKey: zone.tokenKey,
         dnsProvider: zone.dnsProvider || 'cloudflare',
         noPreferred: zone.noPreferred || false,
-        origin: (zone.origins && zone.origins[prefix]) || null,
+        origin,
       });
     }
   }

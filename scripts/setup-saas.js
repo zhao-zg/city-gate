@@ -140,9 +140,16 @@ async function main() {
     for (const prefix of zone.names) {
       const fqdn = `${prefix}.${zoneName}`;
 
+      // 自引用 FQDN（FQDN = origin 主机名，如 answer.07170501.xyz）跳过，
+      // 保留现有 DNS 记录直连源站，避免 Worker 回源死循环
+      const origin = (zone.origins && zone.origins[prefix]) || null;
+      if (origin && fqdn === origin) {
+        console.log(`\n  ▸ ${fqdn} → [自引用 origin] 跳过，保留现有记录`);
+        continue;
+      }
+
       // noPreferred zone: CNAME → 源站
       if (zone.noPreferred) {
-        const origin = (zone.origins && zone.origins[prefix]) || null;
         if (!origin) {
           console.log(`  ⚠ ${fqdn}: noPreferred 但无 origin，跳过`);
           continue;
