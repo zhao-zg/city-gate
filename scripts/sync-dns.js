@@ -961,9 +961,10 @@ function printAssignmentPlan(assignments) {
  * answer 等源站直连子域名单独显式 CNAME，覆盖通配符
  *
  * @param {Array} hwAssignments — 华为云 zone 的 assignments（含 direct 和非 direct）
+ * @param {string} testHost — 1034 真实请求验证用的测试 Host（如 sg.1189.dpdns.org）
  * @returns {Promise<{created, deleted, skipped, errors}>}
  */
-async function processHwIspRecords(hwAssignments) {
+async function processHwIspRecords(hwAssignments, testHost) {
   const dryRun = process.env.DRY_RUN === '1';
 
   // 按 zoneName 分组
@@ -982,6 +983,60 @@ async function processHwIspRecords(hwAssignments) {
   const hasIspIps = ispIps.telecom.length > 0 || ispIps.unicom.length > 0 || ispIps.mobile.length > 0;
   if (!hasIspIps) {
     console.error('  ✗ 三网优选 IP 全部拉取失败，无法配置分线路解析');
+    totalStats.errors = hwAssignments.length;
+    return totalStats;
+  }
+
+  // ── 1034 验证：过滤已知保留 IP + 真实请求验证 ──
+  // 与 CF IP 池（buildIpPool）保持一致：三网 IP 也需 1034 验证，
+  // 避免 cf.090227.xyz 返回的 IP 混入 CF 保留 IP（如 1.1.1.1）直接写入 DNS
+  const ispLines = [
+    { key: 'telecom', label: '电信' },
+    { key: 'unicom', label: '联通' },
+    { key: 'mobile',  label: '移动' },
+  ];
+  for (const l of ispLines) {
+    const raw = ispIps[l.key];
+    // 第1步：快速短路，过滤已知 CF 保留 IP
+    const afterQuick = raw.filter(ip => !sc.is1034Ip(ip));
+    const removed = raw.length - afterQuick.length;
+    if (removed > 0) {
+      console.log(`  [1034 快速过滤] ${l.label}: 移除 ${removed} 个保留 IP → ${raw.filter(ip => sc.is1034Ip(ip)).join(', ')}`);
+    }
+    // 第2步：真实请求验证（testHost 做 SNI+Host），不可用的 IP 不写入 DNS
+    if (testHost && afterQuick.length > 0) {
+      console.log(`  [1034 真实验证] ${l.label}: 验证 ${afterQuick.length} 个 IP (testHost: ${testHost})`);
+      const checks = await Promise.all(afterQuick.map(async (ip) => {
+        const r = await sc.testIp1034(ip, testHost);
+        return { ip, ...r };
+      }));
+      const good = checks.filter(r => r.ok);
+      const bad = checks.filter(r => !r.ok);
+      if (bad.length > 0) {
+        console.log(`    ✗ ${l.label} 不可用 IP (${bad.length}/${checks.length}): ${bad.map(r => `${r.ip}(${r.reason})`).join(', ')}`);
+      }
+      ispIps[l.key] = good.map(r => r.ip);
+    } else {
+      // 无 testHost（不应发生，降级）：仅用快速过滤结果
+      ispIps[l.key] = afterQuick;
+    }
+    if (ispIps[l.key].length === 0) {
+      console.log(`  ⚠ ${l.label}: 1034 验证后无可用 IP，该线路将跳过`);
+    }
+  }
+
+  // default 线路：验证后重新合并三网可用 IP 去重
+  const defaultCandidates = [];
+  for (const l of ispLines) {
+    defaultCandidates.push(...ispIps[l.key]);
+  }
+  ispIps.default = [...new Set(defaultCandidates)];
+  console.log(`  [1034 验证完成] 默认线路重新合并: ${ispIps.default.length} 个 → ${ispIps.default.join(', ') || '(空)'}`);
+
+  // 验证后再次检查是否有可用 IP
+  const hasValidIps = ispIps.telecom.length > 0 || ispIps.unicom.length > 0 || ispIps.mobile.length > 0;
+  if (!hasValidIps) {
+    console.error('  ✗ 三网优选 IP 经 1034 验证后全部不可用，无法配置分线路解析');
     totalStats.errors = hwAssignments.length;
     return totalStats;
   }
@@ -1581,7 +1636,7 @@ async function main() {
 
   if (hwAssignments.length > 0) {
     console.log('\n── 华为云 DNS 三网分线路同步 ──');
-    const hwStats = await processHwIspRecords(hwAssignments);
+    const hwStats = await processHwIspRecords(hwAssignments, testHost);
     syncStats.created += hwStats.created;
     syncStats.deleted += hwStats.deleted;
     syncStats.skipped += hwStats.skipped;
