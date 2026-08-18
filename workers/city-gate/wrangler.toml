@@ -34,10 +34,10 @@ DOMAIN_CONFIG_JSON = """
     { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud" },
     { "name": "07170501.xyz", "dnsProvider": "huaweicloud", "ispSources": {
        "telecom": "ctcc.cloudflare.seeck.cn",
-       "unicom": "cucc.cloudflare.seeck.cn.",
-       "mobile": "cmcc.cloudflare.seeck.cn",
-   }}
-  ],
+       "unicom": "cucc.cloudflare.seeck.cn",
+       "mobile": "cmcc.cloudflare.seeck.cn"
+    }}
+   ],
   "groups": [
     {
       "prefix": "sg",
