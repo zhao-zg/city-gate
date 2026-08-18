@@ -795,7 +795,8 @@ async function buildIpPool(testHost, needCount) {
   }
 
   if (deduped.length === 0) {
-    throw new Error('没有可用的 IP！');
+    console.log('\n  ⚠ IP 池为空！CF zone 将跳过测速与 A 记录写入，保留现有 DNS 记录不变');
+    console.log('  ⚠ 华为云三网分线路同步不受影响，继续执行');
   }
 
   // 收集所有已检测过的 IP（包括不可用的），供后续测速阶段去重
@@ -820,6 +821,21 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   for (let zi = 0; zi < poolZones.length; zi++) {
     const zone = poolZones[zi];
     const ips = [];
+
+    if (poolLen === 0) {
+      // IP 池为空：CF zone 不分配 IP，processARecords 会跳过
+      for (const name of zone.names) {
+        assignments.push({
+          fqdn: `${name}.${zone.zoneName}`,
+          zoneName: zone.zoneName,
+          name,
+          tokenKey: zone.tokenKey,
+          dnsProvider: zone.dnsProvider || 'cloudflare',
+          ips: [],
+        });
+      }
+      continue;
+    }
 
     // 使用偏移分配：每个 zone 从池中不同位置开始取 IP，最大化跨 zone 差异性
     // 当池够大时各 zone 完全不重叠；池不足时各 zone 至少不会完全相同
@@ -1283,6 +1299,11 @@ async function processARecords(assignments) {
 
       // A 记录模式
       const targetIps = a.ips;
+      if (targetIps.length === 0) {
+        console.log(`\n  ▸ ${fqdn} → [A] 无可用 IP，跳过（保留现有记录）`);
+        totalStats.skipped++;
+        continue;
+      }
       console.log(`\n  ▸ ${fqdn} → [A] ${targetIps.join(', ')}`);
 
       try {
@@ -1383,9 +1404,18 @@ async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   const needCount = poolZones.length * IP_PER_ZONE;
-  const { pool: ipPool, seenIps: allSeenIps } = await buildIpPool(testHost, needCount);
 
-  if (ipPool.length < needCount) {
+  let ipPool = [];
+  let allSeenIps = new Set();
+  if (needCount > 0) {
+    const result = await buildIpPool(testHost, needCount);
+    ipPool = result.pool;
+    allSeenIps = result.seenIps;
+  } else {
+    console.log('\n  无 CF A 记录 zone，跳过 IP 池构建');
+  }
+
+  if (needCount > 0 && ipPool.length < needCount) {
     console.log(`\n  ⚠  IP 池 ${ipPool.length} 个，需求 ${needCount} 个（将跨 zone 复用）`);
   }
 
@@ -1416,24 +1446,25 @@ async function main() {
     console.log('');
 
     if (ipPool.length === 0) {
-      throw new Error('没有可用的 IP！');
-    }
+      console.log('\n  ⚠ IP 池为空，跳过测速，CF zone 保留现有 DNS 记录不变');
+      speedResults = [];
+    } else {
+      const offPool = ipPool.slice(0, needCount);
+      console.log('  选中 IP（按延迟排序）:');
+      for (const r of offPool) {
+        const coloStr = r.colo ? `[${r.colo}] ` : '';
+        const sampleStr = r.samples && r.samples.length > 1
+          ? ` (${r.samples.map(s => s === null ? '×' : s).join('/')})`
+          : '';
+        console.log(`    ✓ ${r.ip.padEnd(18)} (${r.latency}ms)${sampleStr} ${coloStr}`);
+      }
+      if (offPool.length < needCount) {
+        console.log(`\n  ⚠ 仅 ${offPool.length} 个 IP，不足 ${needCount}，将跨 zone 复用`);
+      }
 
-    const offPool = ipPool.slice(0, needCount);
-    console.log('  选中 IP（按延迟排序）:');
-    for (const r of offPool) {
-      const coloStr = r.colo ? `[${r.colo}] ` : '';
-      const sampleStr = r.samples && r.samples.length > 1
-        ? ` (${r.samples.map(s => s === null ? '×' : s).join('/')})`
-        : '';
-      console.log(`    ✓ ${r.ip.padEnd(18)} (${r.latency}ms)${sampleStr} ${coloStr}`);
+      // 直接用 offPool 作为 speedResults（无需 speed_kbps 字段，后续不再使用）
+      speedResults = offPool.map(r => ({ ip: r.ip, latency: r.latency, colo: r.colo || null, speed_kbps: 0 }));
     }
-    if (offPool.length < needCount) {
-      console.log(`\n  ⚠ 仅 ${offPool.length} 个 IP，不足 ${needCount}，将跨 zone 复用`);
-    }
-
-    // 直接用 offPool 作为 speedResults（无需 speed_kbps 字段，后续不再使用）
-    speedResults = offPool.map(r => ({ ip: r.ip, latency: r.latency, colo: r.colo || null, speed_kbps: 0 }));
 
   } else {
 
@@ -1559,15 +1590,15 @@ async function main() {
   } // end else (非 off 模式的测速逻辑)
 
   if (speedResults.length === 0) {
-    // 0 个达标：降级补充候选，全部没有则保留旧记录不动
+    // 0 个达标：降级补充候选，全部没有则跳过 CF A 记录同步但继续华为云
     if (subparResults.length > 0) {
       console.log(`\n  ⚠ 没有达标 IP，降级使用 ${subparResults.length} 个测速成功但未达标的 IP`);
       // 按速度降序排列，优先用较快的
       subparResults.sort((a, b) => b.speed_kbps - a.speed_kbps);
       speedResults = subparResults.splice(0, needCount);
     } else {
-      console.log('\n  ⚠ 没有达标 IP 也没有降级候选，保留现有 DNS 记录不变');
-      return;
+      console.log('\n  ⚠ 没有达标 IP 也没有降级候选，CF zone 保留现有 DNS 记录不变');
+      console.log('  ⚠ 华为云三网分线路同步不受影响，继续执行\n');
     }
   }
 
