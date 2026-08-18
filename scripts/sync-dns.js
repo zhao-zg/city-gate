@@ -980,8 +980,11 @@ async function processHwIspRecords(hwAssignments, testHost) {
 
   let totalStats = { created: 0, deleted: 0, skipped: 0, errors: 0 };
 
-  // 拉取三网优选 IP
-  const ispIps = await fetchIspIps();
+  // 三网候选 IP 拉取数量：多拉候选做 1034 验证，最终只取 ISP_IP_PER_LINE 个写入 DNS
+  const ISP_FETCH_COUNT = parseInt(process.env.ISP_FETCH_COUNT || '8', 10);
+
+  // 拉取三网优选 IP（多拉候选，供 1034 验证后取前 ISP_IP_PER_LINE 个）
+  const ispIps = await fetchIspIps(ISP_FETCH_COUNT);
   const hasIspIps = ispIps.telecom.length > 0 || ispIps.unicom.length > 0 || ispIps.mobile.length > 0;
   if (!hasIspIps) {
     console.error('  ✗ 三网优选 IP 全部拉取失败，无法配置分线路解析');
@@ -1024,6 +1027,14 @@ async function processHwIspRecords(hwAssignments, testHost) {
     }
     if (ispIps[l.key].length === 0) {
       console.log(`  ⚠ ${l.label}: 1034 验证后无可用 IP，该线路将跳过`);
+    }
+  }
+
+  // 验证后每条线路截取 ISP_IP_PER_LINE 个写入 DNS（拉取多但只取够用的）
+  for (const l of ispLines) {
+    if (ispIps[l.key].length > ISP_IP_PER_LINE) {
+      console.log(`  [截取] ${l.label}: ${ispIps[l.key].length} → ${ISP_IP_PER_LINE} 个 → ${ispIps[l.key].slice(0, ISP_IP_PER_LINE).join(', ')}`);
+      ispIps[l.key] = ispIps[l.key].slice(0, ISP_IP_PER_LINE);
     }
   }
 
