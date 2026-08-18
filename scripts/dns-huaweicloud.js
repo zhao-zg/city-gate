@@ -13,13 +13,14 @@
  *   公网 Zone: GET /v2/zones?zone_type=public&name={zoneName}
  *   记录集(查询): GET /v2.1/zones/{zone_id}/recordsets?name={fqdn}  ← v2.1 返回 line 字段
  *   记录集(创建): POST /v2.1/zones/{zone_id}/recordsets              ← v2.1 支持 line 参数
- *   记录集(删除): DELETE /v2/zones/{zone_id}/recordsets/{recordset_id}
+ *   记录集(删除): DELETE /v2.1/zones/{zone_id}/recordsets/{recordset_id}  ← v2.1 可删除分线路记录
  *
  * v2 vs v2.1：
  *   v2  API 静默忽略 line 参数，所有记录都创建为 default_view
  *   v2.1 API 支持 line 字段，可创建分线路记录（Dianxin/Liantong/Yidong）
  *   查询也需用 v2.1 才能获取 line 信息（v2 查询不返回 line 字段）
- *   删除记录用 v2 即可（recordset ID 全局唯一，与 API 版本无关）
+ *   删除记录用 v2.1：v2.1 创建的分线路记录只能通过 v2.1 删除，
+ *   v2 DELETE 会返回 "This record set does not exist"
  *
  * 华为云 DNS 记录集与 CF DNS 记录的差异：
  *   - CF: 一条 A 记录对应一个 IP（多 IP = 多条 A 记录）
@@ -90,8 +91,12 @@ function normalizePath(path) {
   const uri = path.split('?')[0];
   const segments = uri.split('/').filter(Boolean);
   const lastSegment = segments[segments.length - 1] || '';
-  // 华为云 resource ID 为 UUID 格式
-  const isResourceId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lastSegment);
+  // 华为云服务端会对 collection 端点自动添加尾部斜杠做签名规范化。
+  // 末尾段为 resource ID（标准 UUID）时不加斜杠，其余 collection 端点加斜杠。
+  // 注意：华为云 recordset/zone ID 虽为 32 位无连字符 hex，但服务端仍会对其加斜杠，
+  // 所以这里只检查标准 UUID 格式，不做 32 位 hex 判断。
+  const isResourceId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lastSegment);
   if (!isResourceId && !uri.endsWith('/')) {
     return uri + '/';
   }
@@ -498,10 +503,13 @@ async function createCnameRecord(zoneId, name, target, options = {}) {
 
 /**
  * 删除记录集
- * DELETE /v2/zones/{zone_id}/recordsets/{recordset_id}
+ * DELETE /v2.1/zones/{zone_id}/recordsets/{recordset_id}
+ *
+ * 使用 v2.1 端点：v2.1 创建的分线路记录（带 line 参数）只能通过 v2.1 删除，
+ * v2 DELETE 会返回 "This record set does not exist"。
  */
 async function deleteDnsRecord(zoneId, recordId) {
-  await hwDnsRequest('DELETE', `/v2/zones/${zoneId}/recordsets/${recordId}`);
+  await hwDnsRequest('DELETE', `/v2.1/zones/${zoneId}/recordsets/${recordId}`);
 }
 
 // ── 导出 ─────────────────────────────────────────────
