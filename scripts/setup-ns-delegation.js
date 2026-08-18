@@ -234,6 +234,28 @@ async function main() {
 
     for (const prefix of zone.names) {
       const fqdn = `${prefix}.${zoneName}`;
+
+      // 自引用 FQDN（FQDN = origin 主机名，如 answer.07170501.xyz）跳过，
+      // 不创建 NS 委托，保留 CF 直连记录，避免华为云回源死循环
+      const origin = (zone.origins && zone.origins[prefix]) || null;
+      if (origin && fqdn === origin) {
+        console.log(`\n  ▸ ${fqdn} → [自引用 origin] 跳过，不创建 NS 委托`);
+        // 清理可能已存在的旧 NS 委托记录（回退到 CF 解析）
+        try {
+          const records = await sc.getDnsRecords(zoneId, fqdn, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
+          const nsRecords = records.filter(r => r.type === 'NS');
+          if (nsRecords.length > 0) {
+            for (const rec of nsRecords) {
+              console.log(`    [清理] 删除旧 NS 委托 → ${rec.content} (id: ${rec.id})`);
+              if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, zone.tokenKey || 'default', sc.DNS_PROVIDER_CF);
+            }
+          }
+        } catch (e) {
+          // 查询失败不阻塞
+        }
+        continue;
+      }
+
       console.log(`\n  ▸ ${fqdn}`);
 
       try {
