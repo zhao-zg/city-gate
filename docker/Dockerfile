@@ -49,7 +49,7 @@ ENV COLO_FILTER=""
 ENV LATENCY_SAMPLES="10"
 # 丢包率上限，超过则过滤（默认 0.1 = 10%）
 ENV MAX_PACKET_LOSS_RATE="0.1"
-# IP 来源：domain=域名解析 / cidr=CF CIDR扫描 / both=两者合并 / 自定义(CIDR,IP,域名混合)
+# IP 来源：domain=域名解析 / cidr=CF CIDR扫描 / both=两者合并 / isp=仅三网API / 自定义(CIDR,IP,域名混合)
 ENV IP_SOURCE="domain"
 # 每个 CIDR 最多采样 IP 数（默认 100）
 ENV CIDR_SAMPLES="100"
@@ -65,5 +65,7 @@ ENV HUAWEICLOUD_DNS_ENDPOINT="https://dns.myhuaweicloud.com"
 # 三网优选 IP 源（华为云分线路解析用）
 ENV ISP_IP_SOURCE="cf.090227.xyz"
 ENV ISP_IP_PER_LINE="2"
+# 三网优选 IP 注入测速候选池的数量（每运营商，0=不注入）
+ENV ISP_IP_POOL_COUNT="0"
 
 ENTRYPOINT ["/entrypoint.sh"]
