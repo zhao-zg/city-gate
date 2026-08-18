@@ -11,9 +11,15 @@
  * 华为云 DNS API 规范：
  *   Endpoint: https://dns.myhuaweicloud.com （公网 Zone 为全局资源）
  *   公网 Zone: GET /v2/zones?zone_type=public&name={zoneName}
- *   记录集:   GET /v2/zones/{zone_id}/recordsets?name={fqdn}
- *   创建:     POST /v2/zones/{zone_id}/recordsets
- *   删除:     DELETE /v2/zones/{zone_id}/recordsets/{recordset_id}
+ *   记录集(查询): GET /v2.1/zones/{zone_id}/recordsets?name={fqdn}  ← v2.1 返回 line 字段
+ *   记录集(创建): POST /v2.1/zones/{zone_id}/recordsets              ← v2.1 支持 line 参数
+ *   记录集(删除): DELETE /v2/zones/{zone_id}/recordsets/{recordset_id}
+ *
+ * v2 vs v2.1：
+ *   v2  API 静默忽略 line 参数，所有记录都创建为 default_view
+ *   v2.1 API 支持 line 字段，可创建分线路记录（Dianxin/Liantong/Yidong）
+ *   查询也需用 v2.1 才能获取 line 信息（v2 查询不返回 line 字段）
+ *   删除记录用 v2 即可（recordset ID 全局唯一，与 API 版本无关）
  *
  * 华为云 DNS 记录集与 CF DNS 记录的差异：
  *   - CF: 一条 A 记录对应一个 IP（多 IP = 多条 A 记录）
@@ -74,7 +80,8 @@ function uriEncode(str) {
 /**
  * 规范化 API 路径
  *
- * 华为云服务端会对 collection 端点自动添加尾部斜杠（如 /v2/zones → /v2/zones/），
+ * 华为云服务端会对 collection 端点自动添加尾部斜杠（如 /v2/zones → /v2/zones/、
+ * /v2.1/zones/{id}/recordsets → /v2.1/zones/{id}/recordsets/），
  * 签名时必须使用与服务端一致的路径，否则签名验证失败。
  *
  * 判断规则：末尾段为 UUID（resource ID）时不加斜杠，其余 collection 端点加斜杠。
@@ -231,7 +238,7 @@ function formatSdkDate(date) {
  * 华为云 DNS API 请求封装
  *
  * @param {string} method - HTTP 方法 (GET/POST/DELETE)
- * @param {string} path - API 路径 (如 /v2/zones)
+ * @param {string} path - API 路径 (如 /v2/zones, /v2.1/zones/{id}/recordsets)
  * @param {object} queryParams - 查询参数 {key: value}
  * @param {string|null} body - 请求体 (POST 时使用)
  * @returns {Promise<object|null>} - 响应 JSON 或 null (204)
@@ -362,7 +369,11 @@ async function getZoneInfo(zoneName) {
 
 /**
  * 查询指定 FQDN 的记录集
- * GET /v2/zones/{zone_id}/recordsets?name={fqdn}
+ * GET /v2.1/zones/{zone_id}/recordsets?name={fqdn}
+ *
+ * 使用 v2.1 端点以获取 line 字段（分线路信息）。
+ * v2 端点不返回 line 字段，导致分线路记录被误判为 default_view。
+ * v2.1 查询失败时自动降级到 v2（全部视为 default_view）。
  *
  * 返回统一格式，与 CF getDnsRecords 兼容：
  *   [{ id, type, name, content, records, ttl, proxied: false, line }]
@@ -373,7 +384,13 @@ async function getDnsRecords(zoneId, fqdn) {
   const queryParams = {
     name: fqdn + '.',
   };
-  const json = await hwDnsRequest('GET', `/v2/zones/${zoneId}/recordsets`, queryParams);
+  let json;
+  try {
+    json = await hwDnsRequest('GET', `/v2.1/zones/${zoneId}/recordsets`, queryParams);
+  } catch (e) {
+    // v2.1 查询失败 → 回退到 v2（无 line 信息，全部视为 default_view）
+    json = await hwDnsRequest('GET', `/v2/zones/${zoneId}/recordsets`, queryParams);
+  }
   const recordsets = json.recordsets || [];
 
   // 转换为 CF 兼容格式
@@ -393,7 +410,13 @@ async function getDnsRecords(zoneId, fqdn) {
 
 /**
  * 创建 A 记录（支持分线路 + 多 IP）
- * POST /v2/zones/{zone_id}/recordsets
+ *
+ * 有分线路时：POST /v2.1/zones/{zone_id}/recordsets（支持 line 字段）
+ * 无分线路时：POST /v2/zones/{zone_id}/recordsets（默认线路）
+ *
+ * v2 API 静默忽略 line 参数，所有记录都创建为 default_view。
+ * v2.1 API 支持 line 字段，可创建分线路记录。
+ * 分线路创建失败时（如 NS 未切换到华为云），自动降级为 v2 默认线路重试。
  *
  * 参数：
  *   zoneId — Zone ID
@@ -417,16 +440,24 @@ async function createARecord(zoneId, name, ips, options = {}) {
     records: ipArray,
   };
   // 仅当指定了非默认线路时才传 line 字段
-  if (line && line !== 'default_view') {
+  const hasLine = line && line !== 'default_view';
+  if (hasLine) {
     bodyObj.line = line;
   }
   const body = JSON.stringify(bodyObj);
+
+  // 有分线路时用 v2.1（支持 line），否则用 v2
+  const apiPath = hasLine
+    ? `/v2.1/zones/${zoneId}/recordsets`
+    : `/v2/zones/${zoneId}/recordsets`;
+
   try {
-    await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
+    await hwDnsRequest('POST', apiPath, {}, body);
   } catch (err) {
     // 分线路创建失败（如 NS 未切换到华为云、Zone 不支持该线路），
-    // 自动降级为默认线路重试
-    if (line && line !== 'default_view' && err.message && err.message.includes('does not exist')) {
+    // 自动降级为 v2 默认线路重试
+    // "already exists" 不降级（由 sync-dns.js 处理合并模式）
+    if (hasLine && !(err.message && err.message.includes('already exists'))) {
       const fallbackBody = JSON.stringify({
         name: name + '.',
         type: 'A',
@@ -443,6 +474,7 @@ async function createARecord(zoneId, name, ips, options = {}) {
 
 /**
  * 创建 CNAME 记录（支持分线路）
+ * 有分线路时用 v2.1 端点，否则用 v2
  * 参数 options.line 可选，指定线路
  */
 async function createCnameRecord(zoneId, name, target, options = {}) {
@@ -453,11 +485,15 @@ async function createCnameRecord(zoneId, name, target, options = {}) {
     ttl: 300,
     records: [target.endsWith('.') ? target : target + '.'],
   };
-  if (line && line !== 'default_view') {
+  const hasLine = line && line !== 'default_view';
+  if (hasLine) {
     bodyObj.line = line;
   }
   const body = JSON.stringify(bodyObj);
-  await hwDnsRequest('POST', `/v2/zones/${zoneId}/recordsets`, {}, body);
+  const apiPath = hasLine
+    ? `/v2.1/zones/${zoneId}/recordsets`
+    : `/v2/zones/${zoneId}/recordsets`;
+  await hwDnsRequest('POST', apiPath, {}, body);
 }
 
 /**

@@ -1092,23 +1092,27 @@ async function processHwIspRecords(hwAssignments) {
         // 如果分线路不支持（NS 未切换），合并所有 IP 创建/更新一条 default_view 记录
         if (!ispLinesSupported) {
           const allIps = [...new Set(lineConfig.flatMap((l) => l.ips))];
-          const existingDefault = existingByLine[HW_LINES.default] || [];
 
-          // 对比 IP 是否一致
-          const existingIps = existingDefault.flatMap((r) => r.records || []);
+          // 重新查询当前记录（上一轮降级可能已创建了部分 default_view 记录）
+          const currentRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
+          const currentA = currentRecords.filter((r) => r.type === 'A');
+
+          // 对比 IP 是否一致（合并所有 A 记录的 IP 与目标比较）
+          const currentIps = currentA.flatMap((r) => r.records || []);
           const targetSet = new Set(allIps);
-          const existingSet = new Set(existingIps);
+          const currentSet = new Set(currentIps);
           const ipsMatch =
-            targetSet.size === existingSet.size &&
-            [...targetSet].every((ip) => existingSet.has(ip));
+            targetSet.size === currentSet.size &&
+            [...targetSet].every((ip) => currentSet.has(ip)) &&
+            currentA.length === 1; // 合并模式只有一条记录
 
           if (ipsMatch) {
             console.log(`    [默认] A ${allIps.join(', ')} → 已匹配，跳过`);
             totalStats.skipped++;
           } else {
-            // 删除旧 default_view A 记录
-            for (const rec of existingDefault) {
-              console.log(`    [默认] 删除旧 A → ${(rec.records || []).join(', ')} (id: ${rec.id})`);
+            // 删除所有旧 A 记录（包括降级产生的部分 default_view 记录）
+            for (const rec of currentA) {
+              console.log(`    [默认] 删除旧 A → ${(rec.records || []).join(', ')} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
               if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
               totalStats.deleted++;
             }
