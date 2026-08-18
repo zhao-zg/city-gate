@@ -197,15 +197,18 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         const zoneTokenKey = (typeof zone === 'object' && zone.tokenKey) || null;
         // zone 级 dnsProvider（可选，默认 cloudflare）
         const zoneDnsProv = (typeof zone === 'object' && zone.dnsProvider) || null;
+        // zone 级 ispSources（可选，华为云三网分线路域名组）
+        const zoneIspSources = (typeof zone === 'object' && zone.ispSources) || null;
 
         let info = zoneInfo.get(zoneName);
         if (!info) {
-          info = { noPreferred: false, origins: {}, tokenKey: zoneTokenKey, dnsProvider: zoneDnsProv || DNS_PROVIDER_CF };
+          info = { noPreferred: false, origins: {}, tokenKey: zoneTokenKey, dnsProvider: zoneDnsProv || DNS_PROVIDER_CF, ispSources: null };
           zoneInfo.set(zoneName, info);
         }
         if (noPreferred) info.noPreferred = true;
         if (zoneTokenKey) info.tokenKey = zoneTokenKey;
         if (zoneDnsProv) info.dnsProvider = zoneDnsProv;
+        if (zoneIspSources) info.ispSources = zoneIspSources;
 
         // 记录每个前缀对应的源站（CNAME 直连目标）
         // 无论是否 noPreferred，有 origin 的前缀都需要记录
@@ -228,6 +231,8 @@ function buildZoneMapFromConfig(config, workerNameOrTokenKey) {
         // 非 noPreferred 华为云 zone: origins 也需传递（显式 CNAME 覆盖通配符 A）
         ...(info.noPreferred ? { noPreferred: true, origins: info.origins } : {}),
         ...(!info.noPreferred && Object.keys(info.origins).length > 0 ? { origins: info.origins } : {}),
+        // 华为云 zone: ispSources 传递（per-zone 三网分线路域名组，可选）
+        ...(info.ispSources ? { ispSources: info.ispSources } : {}),
       });
     }
     return zones;

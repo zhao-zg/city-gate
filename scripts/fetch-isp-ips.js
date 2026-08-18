@@ -193,8 +193,81 @@ async function fetchIspIps(perLine = ISP_IP_PER_LINE) {
   return result;
 }
 
+/**
+ * 通过 DNS 解析域名获取三网分线路 IP
+ *
+ * 与 fetchIspIps()（HTTP API）不同，本函数直接解析域名 A 记录获取 IP。
+ * 适用于任何提供三网分线路 DNS 服务的域名（不依赖 cf.090227.xyz API）。
+ *
+ * 使用 sync-cname.js 的 resolveIps() 进行 DNS 解析：
+ *   4 个公共 DNS 服务器 × 3 轮交叉收集，绕过本地 DNS 缓存
+ *
+ * @param {Object} ispSources - 域名组配置
+ * @param {string} ispSources.telecom - 电信线路域名（必填）
+ * @param {string} ispSources.unicom - 联通线路域名（必填）
+ * @param {string} ispSources.mobile - 移动线路域名（必填）
+ * @param {string} [ispSources.default] - 默认线路域名（可选，留空自动合并三网 IP 去重）
+ * @param {number} [perLine=ISP_IP_PER_LINE] - 每条线路取几个 IP
+ * @returns {Promise<{telecom: string[], unicom: string[], mobile: string[], default: string[]}>}
+ */
+async function fetchIspIpsByDns(ispSources, perLine = ISP_IP_PER_LINE) {
+  const sc = require('./sync-cname');
+
+  console.log(`\n── 三网优选 IP 拉取（DNS 解析模式）──`);
+  console.log(`  电信域名: ${ispSources.telecom || '(未配置)'}`);
+  console.log(`  联通域名: ${ispSources.unicom || '(未配置)'}`);
+  console.log(`  移动域名: ${ispSources.mobile || '(未配置)'}`);
+  console.log(`  默认域名: ${ispSources.default || '(留空，自动合并三网)'}`);
+  console.log(`  每线路: ${perLine} 个 IP`);
+
+  const lines = [
+    { key: 'telecom', label: '电信', domain: ispSources.telecom },
+    { key: 'unicom', label: '联通', domain: ispSources.unicom },
+    { key: 'mobile', label: '移动', domain: ispSources.mobile },
+  ];
+
+  const result = { telecom: [], unicom: [], mobile: [], default: [] };
+
+  for (const l of lines) {
+    if (!l.domain) {
+      console.error(`  ${l.label}: 域名未配置，跳过`);
+      continue;
+    }
+    try {
+      const allIps = await sc.resolveIps(l.domain);
+      const ips = allIps.slice(0, perLine);
+      result[l.key] = ips;
+      console.log(`  ${l.label} (${l.domain}): ${ips.length} 个 → ${ips.join(', ')}`);
+    } catch (e) {
+      console.error(`  ${l.label} (${l.domain}): DNS 解析失败 — ${e.message}`);
+    }
+  }
+
+  // default 线路：优先用专用域名，留空则合并三网 IP 去重
+  if (ispSources.default) {
+    try {
+      const defaultIps = await sc.resolveIps(ispSources.default);
+      result.default = defaultIps.slice(0, perLine);
+      console.log(`  默认 (${ispSources.default}): ${result.default.length} 个 → ${result.default.join(', ')}`);
+    } catch (e) {
+      console.error(`  默认 (${ispSources.default}): DNS 解析失败 — ${e.message}，回退合并三网`);
+      const defaultCandidates = [];
+      for (const l of lines) defaultCandidates.push(...result[l.key]);
+      result.default = [...new Set(defaultCandidates)];
+    }
+  } else {
+    const defaultCandidates = [];
+    for (const l of lines) defaultCandidates.push(...result[l.key]);
+    result.default = [...new Set(defaultCandidates)];
+    console.log(`  默认 (合并三网): ${result.default.length} 个 → ${result.default.join(', ')}`);
+  }
+
+  return result;
+}
+
 module.exports = {
   fetchIspIps,
+  fetchIspIpsByDns,
   HW_LINES,
   ISP_IP_SOURCE,
 };

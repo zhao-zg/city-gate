@@ -15,13 +15,28 @@ compatibility_date = "2024-12-01"
 #   { "name": "zzg.cc.cd", "noPreferred": true }  → 不使用优选域名，
 #     同步脚本（sync-cname.js）会将该 zone 的子域名直接 CNAME 到
 #     各前缀对应的源站 origin，不分配优选域名池
+#
+# 华为云 zone 可选 ispSources 字段（三网分线路 IP 域名组）：
+#   { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud", "ispSources": {
+#       "telecom": "ct.example.com",  ← 电信线路 IP 源域名（必填）
+#       "unicom": "cu.example.com",   ← 联通线路 IP 源域名（必填）
+#       "mobile": "cmcc.example.com", ← 移动线路 IP 源域名（必填）
+#       "default": "def.example.com"  ← 默认线路 IP 源域名（可选，留空自动合并三网 IP 去重）
+#   }}
+#   配置后通过 DNS 解析域名获取各线路 IP（复用 resolveIps，4 个公共 DNS × 3 轮交叉收集）
+#   未配置 ispSources 的华为云 zone 自动回退到 cf.090227.xyz HTTP API
 [vars]
 DOMAIN_CONFIG_JSON = """
 {
   "zones": [
     "1189.dpdns.org",
     "zhaozg.dpdns.org",
-    { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud" }
+    { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud" },
+    { "name": "07170501.xyz", "dnsProvider": "huaweicloud", "ispSources": {
+       "telecom": "ctcc.cloudflare.seeck.cn",
+       "unicom": "cucc.cloudflare.seeck.cn.",
+       "mobile": "cmcc.cloudflare.seeck.cn",
+   }}
   ],
   "groups": [
     {
