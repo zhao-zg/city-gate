@@ -3,6 +3,8 @@ name: Keep Repository Active
 # 防止 GitHub Actions 免费版因仓库闲置（60 天无活动）而暂停 schedule 工作流
 # 每周日凌晨 3 点 UTC（北京时间上午 11 点）发一个空 commit 保持仓库活跃
 # 若无法创建空 commit（如仓库禁止 push），自动创建 issue 提醒
+# 运行日志与 artifact 仅保留 1 天，到期自动清理
+retention-days: 1
 
 on:
   schedule:

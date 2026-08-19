@@ -1,5 +1,8 @@
 name: 构建 Docker 镜像
 
+# 运行日志与 artifact 仅保留 1 天，到期自动清理
+retention-days: 1
+
 on:
   push:
     branches: [master]
