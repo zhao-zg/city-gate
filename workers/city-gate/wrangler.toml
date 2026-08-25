@@ -29,7 +29,7 @@ compatibility_date = "2024-12-01"
 DOMAIN_CONFIG_JSON = """
 {
   "zones": [
-    { "name": "1189.dpdns.org", "noPreferred": true },
+    { "name": "1189.kdns.fr", "noPreferred": true },
     "zhaozg.dpdns.org",
     { "name": "zzgxxx.eu.org", "dnsProvider": "huaweicloud" },
     { "name": "07170501.xyz", "dnsProvider": "huaweicloud", "ispSources": {
