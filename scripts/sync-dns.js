@@ -26,6 +26,8 @@
  *   SPEED_TEST_MODE（可选）— fast=达标即停 / best=全部测完选最优（默认 fast）
  *   MAX_SPEED_TEST_COUNT（可选）— best 模式下最大测速 IP 数（默认 20）
  *   SPEED_TEST_HOST（可选）  — 测速域名（默认自动检测，需为 Worker 路由域名）
+ *   SPEED_TEST_SOURCE（可选）— 测速源：worker=自有 Worker 代理(默认) / official=直连官方端点 / 其他=自定义 URL
+ *   SPEED_TEST_SOURCE_URL（可选）— 自定义测速源 URL（SPEED_TEST_SOURCE 非 worker/official 时使用）
  *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
  *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次不取平均）
  *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.1 = 10%）
@@ -83,6 +85,13 @@ const ENABLE_CF_TOP20 = process.env.ENABLE_CF_TOP20 === '1';
 const ISP_IP_POOL_COUNT = parseInt(process.env.ISP_IP_POOL_COUNT || '0', 10);
 // 每条线路取几个 IP（华为云分线路 A 记录数，与 fetch-isp-ips.js 的 ISP_IP_PER_LINE 一致）
 const ISP_IP_PER_LINE = parseInt(process.env.ISP_IP_PER_LINE || '2', 10);
+
+// ── 测速源选择 ────────────────────────────────────────
+// worker   = 自有 Worker /__down 代理（默认，需测速域名挂在已部署 Worker 路由下）
+// official = 直连 speed.cloudflare.com 官方测速端点（无需 Worker 路由，但国内直连速度受网络限制）
+// 其他 URL = 自定义测速源，仅使用其域名与路径做 Host + SNI（如 https://speed.cloudflare.com/__down?bytes=）
+const SPEED_TEST_SOURCE = (process.env.SPEED_TEST_SOURCE || 'worker').trim().toLowerCase();
+const SPEED_TEST_SOURCE_URL = process.env.SPEED_TEST_SOURCE_URL || '';
 
 // ── IP 质量检测 ──────────────────────────────────────
 
@@ -183,12 +192,20 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 /**
  * 对指定 IP 做下载速度测试
  *
- * 使用自有 Worker 的 /__down 路由代理 speed.cloudflare.com 测速端点。
- * 通过 IP 直连 + Host 指定测速域名（已部署 Worker），HTTPS 443 端口访问。
- * Worker 内部 fetch 到 speed.cloudflare.com 不经过 WAF，443 可正常使用。
+ * 测速源由 SPEED_TEST_SOURCE 决定：
+ *   worker   = 自有 Worker 的 /__down 路由代理 speed.cloudflare.com 测速端点（默认）。
+ *              通过 IP 直连 + Host 指定测速域名（已部署 Worker），HTTPS 443 端口访问。
+ *              Worker 内部 fetch 到 speed.cloudflare.com 不经过 WAF，443 可正常使用。
+ *   official = 直连 speed.cloudflare.com 官方测速端点（IP 直连 + Host/SNI 官方域名）。
+ *              注意：官方端点对边缘 IP 有绑定校验，非绑定 IP 返回 1034/403；
+ *              且国内直连官方端点带宽受限（实测 ~190KB/s），通常不达标。
+ *              仅当测速 IP 恰为该域名绑定边缘时可用，不适合作为常规方案。
+ *   其他 URL = 自定义测速源：解析出域名与路径，IP 直连 + Host/SNI 该域名。
+ *              可配置任意 Cloudflare 测速站点（如 speedtest 镜像 / 自有备用域名）。
+ *              同样受 IP 绑定限制：该域名必须已在 CF 边缘绑定到被测 IP 的证书。
  *
  * 策略：
- *   - 使用 HTTPS 443 端口（通过 Worker 代理，不经过 CF WAF 拦截）
+ *   - 使用 HTTPS 443 端口
  *   - 单连接下载，每次请求 10MB，下载完结束
  *   - 连接超时 3s：TCP/TLS 握手未完成立即终止，不等满硬超时
  *   - keep-alive 复用 TCP 连接，避免反复握手开销
@@ -198,10 +215,32 @@ function dedupIps(ipLatencyList, prefixLen = IP_DEDUP_PREFIX) {
 function testDownloadSpeed(ip, testSec, speedHost) {
   // 每次请求下载 10MB 随机数据
   const CHUNK_BYTES = 10 * 1024 * 1024;
-  // 测速端口（443 = HTTPS，通过 Worker 代理不经过 WAF）
+  // 测速端口（443 = HTTPS）
   const SPEED_PORT = 443;
   // 连接超时：TCP 连接 + TLS 握手超过 3s 未完成则立即终止
   const CONNECT_TIMEOUT_MS = 3000;
+
+  // ── 根据测速源确定请求的 Host/SNI 与路径 ──
+  let reqHost;          // Host 头 + SNI
+  let reqPath;          // 请求路径
+  if (SPEED_TEST_SOURCE === 'official') {
+    reqHost = 'speed.cloudflare.com';
+    reqPath = `/__down?bytes=${CHUNK_BYTES}`;
+  } else if (SPEED_TEST_SOURCE === 'worker') {
+    reqHost = speedHost;
+    reqPath = `/__down?bytes=${CHUNK_BYTES}`;
+  } else {
+    // 自定义 URL：解析出 host（含端口）+ path，IP 直连 + Host/SNI 该域名
+    let customUrl;
+    try {
+      customUrl = new URL(SPEED_TEST_SOURCE_URL);
+    } catch (_) {
+      console.error(`  ✗ SPEED_TEST_SOURCE_URL 非法: ${SPEED_TEST_SOURCE_URL}`);
+      return null;
+    }
+    reqHost = customUrl.hostname;
+    reqPath = customUrl.pathname + customUrl.search || `/__down?bytes=${CHUNK_BYTES}`;
+  }
 
   return new Promise((resolve) => {
     let downloadStart = null;           // 收到响应头时记录，速度只算下载时段
@@ -242,12 +281,17 @@ function testDownloadSpeed(ip, testSec, speedHost) {
     const req = https.request({
       host: ip,
       port: SPEED_PORT,
-      headers: { Host: speedHost },
-      path: `/__down?bytes=${CHUNK_BYTES}`,
+      headers: {
+        Host: reqHost,
+        // 官方测速端点校验 referer，缺少会返回 403（与 Worker 代理端保持一致）
+        referer: 'https://speed.cloudflare.com/',
+      },
+      path: reqPath,
       method: 'GET',
       timeout: timeoutMs,
       agent,
       rejectUnauthorized: false,
+      servername: reqHost,   // SNI 与 Host 一致
     }, (res) => {
       if (res.statusCode !== 200) {
         res.resume();
@@ -1449,9 +1493,9 @@ async function main() {
     console.log(`  DNS Provider: Cloudflare ${cfZones.length} / 华为云 ${hwZones.length} (${hwZones.map(z => z.zoneName).join(', ')})`);
   }
 
-  const testHost = sc.buildTestHost(filteredZones);
+  const testHost = await sc.resolveTestHost(filteredZones);
   if (!testHost) {
-    throw new Error('无法构建测试 Host，请检查 Zone 配置');
+    throw new Error('无法构建测试 Host：所有候选域名均无 A 记录，请检查 Zone 配置');
   }
 
   // ═══════════════════════════════════════════════════
@@ -1528,7 +1572,12 @@ async function main() {
   } else {
 
   console.log(`  模式: ${isBestMode ? 'best（全部测完选最优）' : 'fast（达标即停）'}`);
-  console.log(`  测速域名: ${speedHost}（HTTPS 443，Worker 代理）`);
+  const speedSourceDesc = SPEED_TEST_SOURCE === 'worker'
+    ? `${speedHost}（HTTPS 443，Worker 代理）`
+    : SPEED_TEST_SOURCE === 'official'
+      ? 'speed.cloudflare.com（HTTPS 443，官方端点直连）'
+      : `${SPEED_TEST_SOURCE_URL}（HTTPS 443，自定义源）`;
+  console.log(`  测速源: ${speedSourceDesc}`);
   console.log(`  最低速度: ${MIN_SPEED_KBPS} KB/s`);
   console.log(`  测速时长: ${SPEED_TEST_SEC}s`);
   console.log(`  需求数量: ${needCount} 个达标 IP`);

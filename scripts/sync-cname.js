@@ -578,17 +578,68 @@ async function testIp1034(ip, testHost) {
 
 /**
  * 生成 1034 真实请求验证用的测试 Host
- * 取第一个 zone 的第一个前缀（如 sg.1189.dpdns.org）
+ * 取第一个 zone 的第一个前缀（如 sg.zzgxxx.eu.org）
  * 必须是自家真实 zone 且该 FQDN 会配置 CNAME，才能正确触发 EIV 判定；
  * 首次运行（记录尚未创建）可能显示 1016 而误判可用，第二次运行自动纠正
+ *
+ * 选择优先级：
+ *   1. 华为云三网 zone（dnsProvider=huaweicloud）— 其 A 记录指向优选 IP 池，
+ *      由 sync-dns.js 自动同步，记录必然存在，1034 判定最准确
+ *   2. 普通 CF 优选 zone（非 noPreferred）— 次选
+ *   3. noPreferred zone 直连源站，不作为 1034 测试 Host（仅兜底）
  */
 function buildTestHost(zoneMap) {
   if (zoneMap.length === 0) return null;
-  // 优先选使用优选域名的 zone（其 CNAME 指向池内域名，最贴近实际场景）；
-  // noPreferred zone 直连源站，不作为 1034 测试 Host
-  const first = zoneMap.find(z => !z.noPreferred) || zoneMap[0];
+  // 优先选华为云三网 zone（真实优选 IP，记录由脚本同步，必然存在）
+  // 其次普通 CF 优选 zone（CNAME 指向池内域名，最贴近实际场景）
+  const first = zoneMap.find(z => z.dnsProvider === 'huaweicloud')
+    || zoneMap.find(z => !z.noPreferred)
+    || zoneMap[0];
   const prefix = first.names[0] || 'www';
   return `${prefix}.${first.zoneName}`;
+}
+
+/**
+ * 异步探测可用的测试 Host（推荐运行时使用）
+ *
+ * 与 buildTestHost 的区别：不信任配置里的 zone 一定存在，
+ * 按优先级逐个做 DNS 解析探测，第一个能解析到 A 记录的候选即采用。
+ * 配置里写了但实际 zone 已删除/从未创建的域名（如 1189.dpdns.org 整域 NXDOMAIN）
+ * 会被自动跳过，确保 testHost 一定是"当前真实可用"的域名。
+ *
+ * 探测顺序（同 buildTestHost 优先级）：
+ *   1. 华为云三网 zone（记录由脚本同步，最可靠）
+ *   2. 普通 CF 优选 zone
+ *   3. noPreferred zone（兜底）
+ *
+ * @param {Array} zoneMap - autoDetectZoneMap() 的结果
+ * @returns {Promise<string|null>} 可用的 testHost，全部不可用返回 null
+ */
+async function resolveTestHost(zoneMap) {
+  if (!zoneMap || zoneMap.length === 0) return null;
+
+  // 按优先级排序候选 zone（华为云 → CF 优选 → noPreferred 兜底）
+  const ordered = [
+    ...zoneMap.filter(z => z.dnsProvider === 'huaweicloud'),
+    ...zoneMap.filter(z => z.dnsProvider !== 'huaweicloud' && !z.noPreferred),
+    ...zoneMap.filter(z => z.noPreferred),
+  ];
+
+  for (const zone of ordered) {
+    const prefix = (zone.names && zone.names[0]) || 'www';
+    const host = `${prefix}.${zone.zoneName}`;
+    try {
+      const ips = await resolveIps(host);
+      if (ips && ips.length > 0) {
+        console.log(`  [testHost 探测] ✓ ${host} 可用（${ips.join(', ')}）`);
+        return host;
+      }
+      console.log(`  [testHost 探测] ✗ ${host} 无 A 记录，跳过`);
+    } catch (e) {
+      console.log(`  [testHost 探测] ✗ ${host} 解析失败: ${e.message}`);
+    }
+  }
+  return null;
 }
 
 /**
@@ -776,7 +827,7 @@ async function buildAssignmentPlan() {
   console.log(`  共 ${ZONE_MAP.length} 个 Zone 需同步\n`);
 
   // 第1步：检测优选域名池有效性（真实请求验证 1034，自动跳过风险域名）
-  const testHost = buildTestHost(ZONE_MAP);
+  const testHost = await resolveTestHost(ZONE_MAP);
   const { valid: validPool } = await validatePool(CNAME_POOL, testHost);
 
   if (validPool.length === 0) {
@@ -1257,6 +1308,7 @@ module.exports = {
   fetchCfTop20: fetchCfIpTop20,
   autoRefillPool,
   buildTestHost,
+  resolveTestHost,
   buildAssignmentPlan,
   getZoneId,
   getDnsRecords,

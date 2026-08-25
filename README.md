@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'a7664f31-733d-4a6c-9ebf-7e2df7ed0f1c'
-  PropagateID: 'a7664f31-733d-4a6c-9ebf-7e2df7ed0f1c'
-  ReservedCode1: '0a516a5c-c6b4-4fe6-bbdf-396c54b8ad90'
-  ReservedCode2: '0a516a5c-c6b4-4fe6-bbdf-396c54b8ad90'
+  ProduceID: 'c1690028-989e-4423-b93e-1d20c00aecb8'
+  PropagateID: 'c1690028-989e-4423-b93e-1d20c00aecb8'
+  ReservedCode1: '5dd6b085-9a7d-4ed9-9a45-7aa696530338'
+  ReservedCode2: '5dd6b085-9a7d-4ed9-9a45-7aa696530338'
 ---
 
 # city-gate
@@ -211,6 +211,10 @@ docker run -d \
 | `ZONE_CONFIG_JSON` | 覆盖 wrangler.toml 配置 |
 | `IP_PER_ZONE` | 每 zone 分配的 A 记录 IP 数量（默认 2） |
 | `IP_DEDUP_PREFIX` | IP 去重前缀长度（默认 /24） |
+| `SPEED_TEST_SOURCE` | 测速源：`worker`=自有 Worker 代理（默认）/ `official`=直连 speed.cloudflare.com / 其他=自定义 URL |
+| `SPEED_TEST_SOURCE_URL` | 自定义测速源 URL（`SPEED_TEST_SOURCE` 非 worker/official 时使用） |
 | `HUAWEICLOUD_DNS_AK` | 华为云 Access Key Id（可选） |
 | `HUAWEICLOUD_DNS_SK` | 华为云 Secret Access Key（可选） |
 | `HUAWEICLOUD_DNS_ENDPOINT` | DNS Endpoint（默认 https://dns.myhuaweicloud.com） |
+
+> AI生成

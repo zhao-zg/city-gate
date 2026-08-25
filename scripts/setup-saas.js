@@ -69,7 +69,7 @@ async function main() {
 
   // Step 2: 优选域名池验证
   console.log('\n── 优选域名池验证 ──');
-  const testHost = sc.buildTestHost(zoneMap);
+  const testHost = await sc.resolveTestHost(zoneMap);
   const { valid: validPool } = await sc.validatePool(sc.CNAME_POOL, testHost);
 
   if (validPool.length === 0) {
