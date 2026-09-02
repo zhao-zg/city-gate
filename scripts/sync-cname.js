@@ -858,6 +858,7 @@ async function buildAssignmentPlan() {
           zoneName: zone.zoneName,
           name,
           tokenKey: zone.tokenKey,
+          dnsProvider: zone.dnsProvider || DNS_PROVIDER_CF,
           target: origin,
           direct: true, // 直连源站，非优选域名
         });
@@ -874,6 +875,7 @@ async function buildAssignmentPlan() {
         zoneName: zone.zoneName,
         name,
         tokenKey: zone.tokenKey,
+        dnsProvider: zone.dnsProvider || DNS_PROVIDER_CF,
         target,
         poolIndex,
       });
@@ -1026,7 +1028,7 @@ async function processAssignment(assignments) {
   const zoneGroups = {};
   for (const a of assignments) {
     if (!zoneGroups[a.zoneName]) {
-      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, items: [] };
+      zoneGroups[a.zoneName] = { tokenKey: a.tokenKey, dnsProvider: a.dnsProvider || DNS_PROVIDER_CF, items: [] };
     }
     zoneGroups[a.zoneName].items.push(a);
   }
@@ -1035,11 +1037,12 @@ async function processAssignment(assignments) {
 
   for (const [zoneName, group] of Object.entries(zoneGroups)) {
     const tokenKey = group.tokenKey;
-    console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''} ━━━`);
+    const dnsProvider = group.dnsProvider;
+    console.log(`\n━━━ Zone: ${zoneName}${tokenKey ? ` (账户: ${tokenKey})` : ''}${dnsProvider !== DNS_PROVIDER_CF ? ` (DNS: ${dnsProvider})` : ''} ━━━`);
 
     let zoneId;
     try {
-      zoneId = await getZoneId(zoneName, tokenKey);
+      zoneId = await getZoneId(zoneName, tokenKey, dnsProvider);
     } catch (e) {
       console.error(`  ✗ 获取 Zone ID 失败: ${e.message}`);
       totalStats.errors += group.items.length;
@@ -1051,13 +1054,13 @@ async function processAssignment(assignments) {
       console.log(`\n  ▸ ${fqdn} → ${target}`);
 
       try {
-        const records = await getDnsRecords(zoneId, fqdn, tokenKey);
+        const records = await getDnsRecords(zoneId, fqdn, tokenKey, dnsProvider);
         const cnameRecords = records.filter(r => r.type === 'CNAME');
 
         if (cnameRecords.length === 0) {
           console.log(`    无 CNAME 记录 → 创建 CNAME → ${target}`);
           if (!dryRun) {
-            await createCnameRecord(zoneId, fqdn, target, tokenKey);
+            await createCnameRecord(zoneId, fqdn, target, tokenKey, dnsProvider);
           }
           totalStats.created++;
         } else {
@@ -1071,7 +1074,7 @@ async function processAssignment(assignments) {
             for (const rec of mismatchTarget) {
               console.log(`    删除旧 CNAME → ${rec.content} (id: ${rec.id})`);
               if (!dryRun) {
-                await deleteDnsRecord(zoneId, rec.id, tokenKey);
+                await deleteDnsRecord(zoneId, rec.id, tokenKey, dnsProvider);
               }
               totalStats.deleted++;
             }
@@ -1079,7 +1082,7 @@ async function processAssignment(assignments) {
             if (matchTarget.length === 0) {
               console.log(`    创建 CNAME → ${target}`);
               if (!dryRun) {
-                await createCnameRecord(zoneId, fqdn, target, tokenKey);
+                await createCnameRecord(zoneId, fqdn, target, tokenKey, dnsProvider);
               }
               totalStats.created++;
             } else {

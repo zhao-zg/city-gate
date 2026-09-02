@@ -6,6 +6,7 @@
  *   {prefix}.{zone} → A 记录 → 优选 IP（CF Anycast IP，proxied=false）
  *   noPreferred zone: CNAME → 源站
  *   Worker Route 匹配域名 → 透明转发到 *.pages.dev
+ *   华为云 zone: *.{zone} 分线路 CNAME → opt-{line}.{zone}（CF 侧裸 A 承载三网优选 IP）
  *
  * 三大功能：
  *   1. 同步 DNS — 从优选域名池解析 IP，验证 1034 + 挑战页，按 IP_DEDUP_PREFIX 去重，
@@ -35,7 +36,7 @@
  *   CIDR_SAMPLES（可选）  — 每个 CIDR 最多采样 IP 数（默认 100）
  *   TOKEN_KEY（可选）      — 只处理指定 tokenKey 的 zone
  *   ISP_IP_SOURCE（可选） — 三网优选 IP 源域名（默认 cf.090227.xyz，华为云分线路用）
- *   ISP_IP_PER_LINE（可选）— 每条线路取几个 IP（默认 2，华为云分线路 A 记录数）
+ *   ISP_IP_PER_LINE（可选）— 每条线路取几个 IP（默认 2，CF 侧 opt 自建子域每线路 A 记录数）
  *   ISP_IP_POOL_COUNT（可选）— 三网优选 IP 注入测速候选池的数量（每运营商，默认 0=不注入）
  *
  * 用法：
@@ -81,7 +82,7 @@ const CIDR_SAMPLES = parseInt(process.env.CIDR_SAMPLES || '100', 10);
 // cfIpTop20 补充开关（默认关闭，设为 1 开启）
 const ENABLE_CF_TOP20 = process.env.ENABLE_CF_TOP20 === '1';
 // 三网优选 IP 注入测速候选池的数量（每运营商），0=不注入
-// 与 ISP_IP_PER_LINE（华为云分线路记录数）独立，这里用于扩大测速候选面
+// 与 ISP_IP_PER_LINE（CF 侧 opt 自建子域每线路 A 记录数）独立，这里用于扩大测速候选面
 const ISP_IP_POOL_COUNT = parseInt(process.env.ISP_IP_POOL_COUNT || '0', 10);
 // 每条线路取几个 IP（华为云分线路 A 记录数，与 fetch-isp-ips.js 的 ISP_IP_PER_LINE 一致）
 const ISP_IP_PER_LINE = parseInt(process.env.ISP_IP_PER_LINE || '2', 10);
@@ -931,7 +932,7 @@ function assignIpsToZones(zoneMap, ipPool, ipPerZone) {
   }
 
   // 华为云 zone：加入 assignment 列表（不分配 CF IP，由 processHwIspRecords 单独处理）
-  // 所有前缀（包括有 origin 的，如 answer）都走通配符 A → CF 边缘 IP → Worker 路由转发
+  // 所有前缀（包括有 origin 的，如 answer）都走通配符分线路 CNAME → CF 侧 opt-{line} 子域 → Worker 路由转发
   // 不再为有 origin 的前缀创建显式 CNAME 直连源站，统一由 Worker 路由处理
   // ispSources 传递：per-zone 三网分线路域名组（可选，未配则 processHwIspRecords 回退 HTTP API）
   // 例外：FQDN 等于 origin 主机名时（自引用，如 answer.07170501.xyz → answer.07170501.xyz），
@@ -1010,21 +1011,39 @@ function printAssignmentPlan(assignments) {
 // ── DNS 同步主逻辑 ──────────────────────────────────
 
 /**
- * 华为云三网分线路同步
+ * 华为云三网分线路同步（CNAME 方案）
  *
- * 为华为云 DNS zone 创建通配符泛解析记录，按运营商线路分别指向对应优选 IP：
- *   *.zzgxxx.eu.org  A  Dianxin   → [电信IP1, 电信IP2]
- *   *.zzgxxx.eu.org  A  Liantong  → [联通IP1, 联通IP2]
- *   *.zzgxxx.eu.org  A  Yidong    → [移动IP1, 移动IP2]
- *   *.zzgxxx.eu.org  A  default   → [默认IP1, 默认IP2]
+ * 两阶段架构：
+ *   阶段1（CF 侧，zone 根域托管在 CF）：为每个线路创建自建子域裸 A 记录，承载三网优选 IP
+ *     opt-tel.{zone}     A → [电信IP1, 电信IP2]（proxied=false）
+ *     opt-unicom.{zone}  A → [联通IP1, 联通IP2]
+ *     opt-mobile.{zone}  A → [移动IP1, 移动IP2]
+ *     opt-default.{zone} A → [默认IP1, 默认IP2]
  *
- * 所有前缀（Pages + 非 Pages 如 answer）统一走通配符 A → CF 边缘 IP → Worker 路由转发
- * 清理已存在的显式 CNAME/A 记录，避免覆盖通配符
+ *   阶段2（华为云侧，zone 子域托管在华为云）：通配符分线路 CNAME 指向阶段1的 opt 子域
+ *     *.{zone}  CNAME Dianxin   → opt-tel.{zone}
+ *     *.{zone}  CNAME Liantong  → opt-unicom.{zone}
+ *     *.{zone}  CNAME Yidong    → opt-mobile.{zone}
+ *     *.{zone}  CNAME default   → opt-default.{zone}
+ *
+ * 切换顺序约束：华为云 CNAME 与 A 不能同 recordset 共存，必须先建 CF 侧 A（target 就位）
+ * → 再删华为云旧 A → 建 CNAME。CF 侧 default 线路未就绪则跳过华为云写入（保留现有记录）
+ *
+ * 兜底：某线路无可用 IP → 不建该线路 CNAME，解析自动落到华为云 default_view → opt-default
  *
  * @param {Array} hwAssignments — 华为云 zone 的 assignments（含 direct 和非 direct）
  * @param {string} testHost — 1034 真实请求验证用的测试 Host（如 sg.1189.dpdns.org）
  * @returns {Promise<{created, deleted, skipped, errors}>}
  */
+
+// 华为云线路 → CF 侧 opt 自建子域前缀（opt-{line}.{zone}，与华为云 CNAME 指向的目标）
+const OPT_LINE_PREFIX = {
+  [HW_LINES.telecom]: 'opt-tel',
+  [HW_LINES.unicom]: 'opt-unicom',
+  [HW_LINES.mobile]: 'opt-mobile',
+  [HW_LINES.default]: 'opt-default',
+};
+
 async function processHwIspRecords(hwAssignments, testHost) {
   const dryRun = process.env.DRY_RUN === '1';
 
@@ -1183,135 +1202,178 @@ async function processHwIspRecords(hwAssignments, testHost) {
       continue;
     }
 
-    // 所有前缀统一走通配符 A 记录（包括 answer 等非 Pages 前缀，由 Worker 路由转发）
+    // 所有前缀统一走通配符分线路 CNAME → CF 侧 opt-{line} 自建子域（包括 answer 等非 Pages 前缀，由 Worker 路由转发）
     const poolItems = group.items;
 
-    // ── 通配符 A 记录：一条 * 记录覆盖所有前缀 ──
     if (poolItems.length > 0) {
       const wildcardName = `*.${zoneName}`;
-      console.log(`\n  ▸ ${wildcardName} → 三网分线路 A 记录`);
+      console.log(`\n  ▸ ${wildcardName} → 分线路 CNAME → CF 侧 opt-{line}.${zoneName}`);
 
       try {
-        // 查询现有记录
-        const existingRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
-
-        // 先删除同名 CNAME 记录（旧通配符 CNAME 会与 A 记录冲突）
-        const conflictingCnames = existingRecords.filter((r) => r.type === 'CNAME');
-        for (const rec of conflictingCnames) {
-          console.log(`    [清理] 删除冲突 CNAME → ${rec.content} (id: ${rec.id})`);
-          if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
-          totalStats.deleted++;
-        }
-
-        // 按线路分组现有 A 记录
-        const existingByLine = {};
-        for (const rec of existingRecords) {
-          if (rec.type !== 'A') continue;
-          const line = rec.line || 'default_view';
-          if (!existingByLine[line]) existingByLine[line] = [];
-          existingByLine[line].push(rec);
-        }
-
-        // 尝试分线路模式：逐线路创建 A 记录
-        // 如果 NS 未切换到华为云，分线路会失败降级为 default_view
-        // 此时改为合并所有 IP 创建一条 default_view 记录
-        let ispLinesSupported = true;
+        // ═══ 阶段1：CF 侧创建 opt-{line}.{zone} 自建子域裸 A 记录（承载三网优选 IP） ═══
+        // zone 根域托管在 CF，opt-* 无 NS 委托记录，由 CF 权威直接应答，不会被华为云通配符截胡
+        const cfZoneId = await sc.getZoneId(zoneName, tokenKey, 'cloudflare');
+        const cfOkLines = new Set(); // CF 侧 A 记录就绪的线路
+        const lineToOptFqdn = new Map(); // line → opt 子域 FQDN
 
         for (const lc of lineConfig) {
-          const targetIps = lc.ips;
-          const existing = existingByLine[lc.line] || [];
+          const optPrefix = OPT_LINE_PREFIX[lc.line];
+          const optFqdn = `${optPrefix}.${zoneName}`;
+          lineToOptFqdn.set(lc.line, optFqdn);
 
-          // 对比 IP 是否一致
-          const existingIps = existing.flatMap((r) => r.records || []);
-          const targetSet = new Set(targetIps);
+          console.log(`\n    [CF ${lc.label}] ${optFqdn} → A ${lc.ips.join(', ')}（proxied=false）`);
+          const optRecords = await sc.getDnsRecords(cfZoneId, optFqdn, tokenKey, 'cloudflare');
+
+          // 删非 A 记录（避免与目标 A 冲突）
+          const nonA = optRecords.filter((r) => r.type !== 'A');
+          for (const rec of nonA) {
+            console.log(`      [清理] 删除冲突 ${rec.type} → ${rec.content} (id: ${rec.id})`);
+            if (!dryRun) await sc.deleteDnsRecord(cfZoneId, rec.id, tokenKey, 'cloudflare');
+            totalStats.deleted++;
+          }
+
+          // A 记录 diff（CF 一条 A 一个 IP）
+          const aRecords = optRecords.filter((r) => r.type === 'A');
+          const existingIps = aRecords.map((r) => r.content);
+          const targetSet = new Set(lc.ips);
           const existingSet = new Set(existingIps);
+          const toDelete = aRecords.filter((r) => !targetSet.has(r.content));
+          const toCreate = lc.ips.filter((ip) => !existingSet.has(ip));
 
-          const ipsMatch =
-            targetSet.size === existingSet.size &&
-            [...targetSet].every((ip) => existingSet.has(ip));
-
-          if (ipsMatch) {
-            console.log(`    [${lc.label}] A ${targetIps.join(', ')} → 已匹配，跳过`);
+          for (const rec of toDelete) {
+            console.log(`      [CF ${lc.label}] 删除 A → ${rec.content} (id: ${rec.id})`);
+            if (!dryRun) await sc.deleteDnsRecord(cfZoneId, rec.id, tokenKey, 'cloudflare');
+            totalStats.deleted++;
+          }
+          for (const ip of toCreate) {
+            console.log(`      [CF ${lc.label}] 创建 A → ${ip}`);
+            if (!dryRun) await sc.createARecord(cfZoneId, optFqdn, ip, tokenKey, 'cloudflare');
+            totalStats.created++;
+          }
+          if (toDelete.length === 0 && toCreate.length === 0) {
+            console.log(`      [CF ${lc.label}] A 记录已匹配 → 跳过`);
             totalStats.skipped++;
-          } else {
-            // 删除旧记录
+          }
+
+          cfOkLines.add(lc.line);
+        }
+
+        // ═══ 阶段2：华为云侧通配符分线路 CNAME（仅当 CF 侧 default 线路就绪时执行） ═══
+        // default 未就绪则跳过整个华为云写入，避免 CNAME 悬空引用
+        if (!cfOkLines.has(HW_LINES.default)) {
+          console.warn(`\n    ⚠ CF 侧 opt-default.${zoneName} 未就绪，跳过华为云 CNAME 写入（保留现有记录）`);
+        } else {
+          const existingRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
+
+          // 迁移清理：删除旧通配符 A 记录（CNAME 与 A 不能同 recordset 共存）
+          const oldARecords = existingRecords.filter((r) => r.type === 'A');
+          for (const rec of oldARecords) {
+            console.log(`    [迁移] 删除旧通配符 A → ${(rec.records || []).join(', ')} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
+            if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+            totalStats.deleted++;
+          }
+
+          // 尝试分线路 CNAME：逐线路创建，目标为 CF 侧 opt-{line} 子域
+          // 某线路创建失败（already exists）→ 标记分线路不支持，切换合并模式（单条 default_view CNAME）
+          // 其他失败 → 仅跳过该线路（解析落到 default），不中断
+          let ispLinesSupported = true;
+
+          for (const lc of lineConfig) {
+            const optFqdn = lineToOptFqdn.get(lc.line);
+            const existing = existingRecords.filter(
+              (r) => r.type === 'CNAME' && (r.line || 'default_view') === lc.line
+            );
+
+            // isMatch：该线路恰好一条 CNAME 且目标匹配（华为云 records 数组 target 带尾部点号，需去掉）
+            const normalizedTargets = (existing[0]?.records || []).map((t) => String(t).replace(/\.$/, ''));
+            const isMatch = existing.length === 1 && normalizedTargets.length === 1 && normalizedTargets[0] === optFqdn;
+
+            if (isMatch) {
+              console.log(`    [${lc.label}] CNAME → ${optFqdn} 已匹配，跳过`);
+              totalStats.skipped++;
+              continue;
+            }
+
+            // 删除该线路旧 CNAME 再重建（CNAME 目标变化或重复记录）
             for (const rec of existing) {
-              console.log(`    [${lc.label}] 删除旧 A → ${(rec.records || []).join(', ')} (id: ${rec.id})`);
+              console.log(`    [${lc.label}] 删除旧 CNAME → ${rec.content} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
               if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
               totalStats.deleted++;
             }
-            // 创建新记录
-            console.log(`    [${lc.label}] 创建 A → ${targetIps.join(', ')}`);
+            console.log(`    [${lc.label}] 创建 CNAME → ${optFqdn}`);
             if (!dryRun) {
               try {
-                await sc.createARecord(zoneId, wildcardName, targetIps, tokenKey, 'huaweicloud', {
-                  ips: targetIps,
+                await sc.createCnameRecord(zoneId, wildcardName, optFqdn, tokenKey, 'huaweicloud', false, {
                   line: lc.line,
                 });
               } catch (createErr) {
-                if (createErr.message && createErr.message.includes('already exists')) {
-                  // 分线路降级为 default_view 后，多条线路重复创建 default_view 冲突
-                  // 标记分线路不支持，后续改为合并模式
+                if (
+                  createErr.message &&
+                  createErr.message.includes('already exists') &&
+                  lc.line !== HW_LINES.default
+                ) {
+                  // 分线路降级冲突（NS 未切换等），切换合并模式
                   console.log(`    [${lc.label}] 分线路降级冲突，切换为合并模式`);
                   ispLinesSupported = false;
                   break;
                 } else {
-                  throw createErr;
+                  // 其他错误：仅跳过该线路，不中断（解析落到 default）
+                  console.error(`    ✗ [${lc.label}] CNAME 创建失败，跳过该线路: ${createErr.message}`);
+                  continue;
                 }
               }
             }
             totalStats.created++;
           }
-        }
 
-        // 如果分线路不支持（NS 未切换），合并所有 IP 创建/更新一条 default_view 记录
-        if (!ispLinesSupported) {
-          const allIps = [...new Set(lineConfig.flatMap((l) => l.ips))];
-
-          // 重新查询当前记录（上一轮降级可能已创建了部分 default_view 记录）
-          const currentRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
-          const currentA = currentRecords.filter((r) => r.type === 'A');
-
-          // 对比 IP 是否一致（合并所有 A 记录的 IP 与目标比较）
-          const currentIps = currentA.flatMap((r) => r.records || []);
-          const targetSet = new Set(allIps);
-          const currentSet = new Set(currentIps);
-          const ipsMatch =
-            targetSet.size === currentSet.size &&
-            [...targetSet].every((ip) => currentSet.has(ip)) &&
-            currentA.length === 1; // 合并模式只有一条记录
-
-          if (ipsMatch) {
-            console.log(`    [默认] A ${allIps.join(', ')} → 已匹配，跳过`);
-            totalStats.skipped++;
-          } else {
-            // 删除所有旧 A 记录（包括降级产生的部分 default_view 记录）
-            for (const rec of currentA) {
-              console.log(`    [默认] 删除旧 A → ${(rec.records || []).join(', ')} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
+          // 清理无效线路 CNAME（目标不在有效集合中的）
+          const validTargets = new Set(
+            lineConfig.filter((l) => cfOkLines.has(l.line)).map((l) => lineToOptFqdn.get(l.line))
+          );
+          for (const rec of existingRecords) {
+            if (rec.type !== 'CNAME') continue;
+            const targets = (rec.records || []).map((t) => String(t).replace(/\.$/, ''));
+            const targetOk = targets.length > 0 && targets.every((t) => validTargets.has(t));
+            const lineOk = cfOkLines.has(rec.line || 'default_view');
+            if (!targetOk || !lineOk) {
+              console.log(`    [清理] 删除无效 CNAME → ${targets.join(', ')} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
               if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
               totalStats.deleted++;
-            }
-            // 创建合并的 default_view 记录
-            console.log(`    [默认] 创建 A → ${allIps.join(', ')} (合并三网 IP)`);
-            if (!dryRun) {
-              await sc.createARecord(zoneId, wildcardName, allIps, tokenKey, 'huaweicloud', {
-                ips: allIps,
-                line: HW_LINES.default,
-              });
-            }
-            totalStats.created++;
           }
-        }
+          }
 
-        // 清理非分线路的旧 A 记录（line=default_view 但不在 lineConfig 中的，或重复的）
-        const validLines = new Set(lineConfig.map((l) => l.line));
-        for (const rec of existingRecords) {
-          if (rec.type !== 'A') continue;
-          const line = rec.line || 'default_view';
-          if (!validLines.has(line)) {
-            console.log(`    [清理] 删除无效线路 A → ${(rec.records || []).join(', ')} (line: ${line}, id: ${rec.id})`);
-            if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
-            totalStats.deleted++;
+          // 分线路不支持（NS 未切换）→ 合并模式：单条 default_view CNAME → opt-default
+          if (!ispLinesSupported) {
+            const defaultOptFqdn = lineToOptFqdn.get(HW_LINES.default);
+            console.log(`    [合并模式] CNAME → ${defaultOptFqdn} (default_view 单条)`);
+            // 重新查询当前记录（上一轮降级可能已创建了部分记录）
+            const currentRecords = await sc.getDnsRecords(zoneId, wildcardName, tokenKey, 'huaweicloud');
+            const currentCnames = currentRecords.filter((r) => r.type === 'CNAME');
+            const normalizedCur = currentCnames.flatMap((r) =>
+              (r.records || []).map((t) => String(t).replace(/\.$/, ''))
+            );
+            const matchAll =
+              currentCnames.length === 1 &&
+              normalizedCur.length === 1 &&
+              normalizedCur[0] === defaultOptFqdn;
+
+            if (matchAll) {
+              console.log(`    [合并模式] CNAME → ${defaultOptFqdn} 已匹配，跳过`);
+              totalStats.skipped++;
+            } else {
+              for (const rec of currentCnames) {
+                console.log(`    [合并模式] 删除旧 CNAME → ${rec.content} (line: ${rec.line || 'default_view'}, id: ${rec.id})`);
+                if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
+                totalStats.deleted++;
+              }
+              console.log(`    [合并模式] 创建 CNAME → ${defaultOptFqdn}`);
+              if (!dryRun) {
+                await sc.createCnameRecord(zoneId, wildcardName, defaultOptFqdn, tokenKey, 'huaweicloud', false, {
+                  line: HW_LINES.default,
+                });
+              }
+              totalStats.created++;
+            }
           }
         }
       } catch (e) {
@@ -1320,15 +1382,16 @@ async function processHwIspRecords(hwAssignments, testHost) {
       }
     }
 
-    // 所有前缀统一走通配符 A → CF 边缘 IP → Worker 路由转发
-    // 清理已存在的显式 CNAME/A 记录（如旧 answer CNAME），否则会覆盖通配符 A
+    // 所有前缀统一走通配符 CNAME → CF 侧 opt-{line} 子域 → 优选 IP → Worker 路由转发
+    // 清理已存在的显式 CNAME/A 记录（如旧 answer CNAME），否则会覆盖通配符 CNAME
+    // 注意：CF 侧的 opt-* 自建子域不受影响（本循环只查华为云 zone）
     for (const a of group.items) {
       const { fqdn } = a;
       try {
         const records = await sc.getDnsRecords(zoneId, fqdn, tokenKey, 'huaweicloud');
         if (records.length > 0) {
           for (const rec of records) {
-            console.log(`  [清理] 删除 ${fqdn} 的显式 ${rec.type} → ${rec.content} (id: ${rec.id})，改由通配符 A 覆盖`);
+            console.log(`  [清理] 删除 ${fqdn} 的显式 ${rec.type} → ${rec.content} (id: ${rec.id})，改由通配符 CNAME 覆盖`);
             if (!dryRun) await sc.deleteDnsRecord(zoneId, rec.id, tokenKey, 'huaweicloud');
             totalStats.deleted++;
           }
@@ -1847,7 +1910,7 @@ async function main() {
     }
 
     if (dnsProvider === 'huaweicloud') {
-      // 华为云 zone：通配符记录无法按具体 FQDN 查到，统一查 *.zone
+      // 华为云 zone：通配符记录无法按具体 FQDN 查到，统一查 *.zone（分线路 CNAME → opt-{line}）
       const wildcardName = `*.${zoneName}`;
       try {
         const wRecords = await sc.getDnsRecords(zoneId, wildcardName, group.tokenKey, dnsProvider);
@@ -1861,6 +1924,27 @@ async function main() {
         }
       } catch (e) {
         console.error(`    ✗ ${wildcardName} 查询失败: ${e.message}`);
+      }
+      // 显示 CF 侧 opt-{line} 自建子域 A 记录（三网优选 IP 承载）
+      try {
+        const cfZoneId = await sc.getZoneId(zoneName, group.tokenKey, 'cloudflare');
+        for (const lc of Object.values(OPT_LINE_PREFIX)) {
+          const optFqdn = `${lc}.${zoneName}`;
+          try {
+            const optRecords = await sc.getDnsRecords(cfZoneId, optFqdn, group.tokenKey, 'cloudflare');
+            if (optRecords.length === 0) {
+              console.log(`    ⚠ ${optFqdn} [CF]: 无 DNS 记录`);
+            } else {
+              for (const rec of optRecords) {
+                console.log(`    ${optFqdn} [CF]: ${rec.type} → ${rec.content}`);
+              }
+            }
+          } catch (e) {
+            console.error(`    ✗ ${optFqdn} [CF] 查询失败: ${e.message}`);
+          }
+        }
+      } catch (e) {
+        console.error(`    ✗ CF 侧 Zone ID 获取失败，跳过 opt-* 显示: ${e.message}`);
       }
       // 再显示显式 CNAME（answer 等直连子域名，覆盖通配符）
       for (const f of group.items) {
@@ -1923,7 +2007,7 @@ async function main() {
     if (checkIp) {
       console.log(`  ▸ 检测 ${f.fqdn} (→ ${checkIp})...`);
     } else if (isHwZone) {
-      console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS，华为云通配符)...`);
+      console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS，华为云通配符 CNAME → opt-*)...`);
     } else {
       console.log(`  ▸ 检测 ${f.fqdn} (系统 DNS)...`);
     }
