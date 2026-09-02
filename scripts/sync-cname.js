@@ -888,10 +888,11 @@ async function buildAssignmentPlan() {
 // ── 工具函数 ──────────────────────────────────────────
 
 function getToken(tokenKey) {
-  // 支持 'default' 和 'account2' 等自定义 key
+  // 支持 'default'、'account2'、'account3' 等自定义 key
   const TOKEN_MAP = {
     default: process.env.CLOUDFLARE_API_TOKEN,
     account2: process.env.CLOUDFLARE_API_TOKEN_2,
+    account3: process.env.CLOUDFLARE_API_TOKEN_3,
   };
   const token = TOKEN_MAP[tokenKey || 'default'];
   if (!token) throw new Error(`API Token 未设置 (key: ${tokenKey || 'default'})`);
