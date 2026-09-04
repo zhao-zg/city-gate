@@ -207,29 +207,54 @@ function raceSuffix() {
   // 确定初始选中节点：当前域名 > 缓存
   var initialSuffix = detectCurrentSuffix() || getCachedSuffix() || null;
 
-  var results = {};
-  var promises = suffixes.map(function(suffix) {
+  // 每域名测 2 轮取最小值：
+  //  - 单次测量易受网络抖动影响，最小值更接近真实延迟
+  //  - 第 1 轮 DNS 未缓存的域名会偏慢，第 2 轮大家都热了，min 口径更公平
+  var results = {};   // suffix -> 当前最小延迟（99999 = 不可达）
+
+  // 单次探测：3 秒独立超时（AbortController），不拖累整页竞速
+  function probeOnce(suffix, round) {
     var start = Date.now();
-    return fetch('https://apk.' + suffix + '/?_t=' + start, { method: 'HEAD', cache: 'no-store' })
+    var controller = ('AbortController' in window) ? new AbortController() : null;
+    var opts = { method: 'HEAD', cache: 'no-store' };
+    if (controller) {
+      opts.signal = controller.signal;
+      setTimeout(function() { controller.abort(); }, 3000);
+    }
+    return fetch('https://apk.' + suffix + '/?_t=' + start + '_' + round, opts)
       .then(function(r) {
         // 只有 2xx/3xx 才算真正可访问，5xx/4xx（含 1034 等）视为不可用
         if (r.status >= 200 && r.status < 400) {
-          results[suffix] = Date.now() - start;
-        } else {
+          var t = Date.now() - start;
+          // 取本轮与历史轮次的最小值
+          if (results[suffix] === undefined || t < results[suffix]) { results[suffix] = t; }
+        } else if (results[suffix] === undefined) {
+          // 有历史成功样本时不覆盖为不可达；本轮失败只跳过
           results[suffix] = 99999;
         }
       })
       .catch(function() {
-        results[suffix] = 99999;
+        if (results[suffix] === undefined) { results[suffix] = 99999; }
       });
-  });
+  }
 
-  // 5 秒超时兜底，防止所有域名不可达时等太久
+  // 轮内 6 域名并发，轮间串行（第 2 轮等第 1 轮结束再发起）：
+  //  - 避免两轮叠乘成 12 个并发请求抢连接池/带宽
+  //  - 第 2 轮发起时 DNS 已全部热过，min 口径才公平
+  function probeRound(round) {
+    return Promise.all(suffixes.map(function(suffix) {
+      return probeOnce(suffix, round);
+    }));
+  }
+
+  var allRounds = probeRound(1).then(function() { return probeRound(2); });
+
+  // 8 秒超时兜底（2 轮串行 + 单请求 3s 独立超时），防止所有域名不可达时等太久
   var timeout = new Promise(function(resolve) {
-    setTimeout(function() { resolve(null); }, 5000);
+    setTimeout(function() { resolve(null); }, 8000);
   });
 
-  return Promise.race([Promise.all(promises), timeout]).then(function() {
+  return Promise.race([allRounds, timeout]).then(function() {
     // 选最快节点
     var best = suffixes[0];
     var bestTime = 99999;

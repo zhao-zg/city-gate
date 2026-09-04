@@ -128,30 +128,29 @@ function measureLatency(ip, port = 443) {
 }
 
 /**
- * 多次采样测量延迟，取平均值
- * 参数 firstLatency：若传入非 null，作为第一次采样结果（复用 1034 检测的 TLS 握手延迟，省一次 TCP 连接）
+ * 多次采样测量延迟，取中位数
+ * 中位数抗网络抖动：个别采样异常偏高/偏低不影响最终结果（均值会被极端值拉偏）
  * 返回 { avgLatency, samples, successCount, totalCount }
- *   avgLatency  — 平均延迟（ms），null 表示全部失败
+ *   avgLatency  — 中位数延迟（ms），null 表示全部失败
  *   samples    — 各次结果数组（null = 失败，数字 = 延迟ms）
  *   successCount — 成功次数
  *   totalCount   — 总采样次数
  */
-async function measureLatencyMulti(ip, samples, port = 443, firstLatency = null) {
+async function measureLatencyMulti(ip, samples, port = 443) {
   const results = [];
-  // 复用 1034 检测时的 TLS 握手延迟作为第一次采样
-  if (firstLatency !== null && samples > 0) {
-    results.push(firstLatency);
-  }
-  const remaining = samples - results.length;
-  for (let i = 0; i < remaining; i++) {
+  for (let i = 0; i < samples; i++) {
     const latency = await measureLatency(ip, port);
     results.push(latency);
   }
-  const successCount = results.filter(r => r !== null).length;
-  const avgLatency = successCount > 0
-    ? Math.round(results.reduce((sum, r) => sum + (r || 0), 0) / successCount)
-    : null;
-  return { avgLatency, samples: results, successCount, totalCount: samples };
+  const success = results.filter(r => r !== null).sort((a, b) => a - b);
+  const successCount = success.length;
+  let avgLatency = null;
+  if (successCount > 0) {
+    const mid = Math.floor(successCount / 2);
+    // 偶数个取中间两值均值，奇数个取正中值
+    avgLatency = successCount % 2 === 1 ? success[mid] : Math.round((success[mid - 1] + success[mid]) / 2);
+  }
+  return { avgLatency, samples, successCount, totalCount: samples };
 }
 
 /**
@@ -222,14 +221,17 @@ function testDownloadSpeed(ip, testSec, speedHost) {
   const CONNECT_TIMEOUT_MS = 3000;
 
   // ── 根据测速源确定请求的 Host/SNI 与路径 ──
+  // 防缓存：URL 加随机参数 + 请求头 Cache-Control: no-cache，避免边缘/中间层缓存命中导致速度虚高
+  // （official 端点与 Worker 代理本身不缓存，此措施对自定义 URL 源尤其重要）
+  const CACHE_BUSTER = `_cb=${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let reqHost;          // Host 头 + SNI
   let reqPath;          // 请求路径
   if (SPEED_TEST_SOURCE === 'official') {
     reqHost = 'speed.cloudflare.com';
-    reqPath = `/__down?bytes=${CHUNK_BYTES}`;
+    reqPath = `/__down?bytes=${CHUNK_BYTES}&${CACHE_BUSTER}`;
   } else if (SPEED_TEST_SOURCE === 'worker') {
     reqHost = speedHost;
-    reqPath = `/__down?bytes=${CHUNK_BYTES}`;
+    reqPath = `/__down?bytes=${CHUNK_BYTES}&${CACHE_BUSTER}`;
   } else {
     // 自定义 URL：解析出 host（含端口）+ path，IP 直连 + Host/SNI 该域名
     let customUrl;
@@ -241,6 +243,7 @@ function testDownloadSpeed(ip, testSec, speedHost) {
     }
     reqHost = customUrl.hostname;
     reqPath = customUrl.pathname + customUrl.search || `/__down?bytes=${CHUNK_BYTES}`;
+    reqPath = reqPath + (reqPath.includes('?') ? '&' : '?') + CACHE_BUSTER;
   }
 
   return new Promise((resolve) => {
@@ -286,6 +289,9 @@ function testDownloadSpeed(ip, testSec, speedHost) {
         Host: reqHost,
         // 官方测速端点校验 referer，缺少会返回 403（与 Worker 代理端保持一致）
         referer: 'https://speed.cloudflare.com/',
+        // 防缓存：要求路径上所有缓存层重新回源
+        'cache-control': 'no-cache',
+        pragma: 'no-cache',
       },
       path: reqPath,
       method: 'GET',
@@ -661,9 +667,8 @@ async function buildIpPool(testHost, needCount) {
       if (!check.ok) {
         return { ip, ok: false, reason: check.reason, latency: null, colo, samples: [], successCount: 0, totalCount: 0 };
       }
-      // 复用 1034 检测的 TLS 握手延迟作为第一次采样，省一次 TCP 连接
-      const firstLatency = check.connectLatency || null;
-      const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES, 443, firstLatency);
+      // 延迟采样统一用纯 TCP 握手口径，不复用 1034 检测的 TLS 握手延迟（两者口径不同）
+      const { avgLatency, samples, successCount, totalCount } = await measureLatencyMulti(ip, LATENCY_SAMPLES);
       if (avgLatency === null) {
         return { ip, ok: false, reason: 'TCP 连接失败', latency: null, colo, samples, successCount, totalCount };
       }
