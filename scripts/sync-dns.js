@@ -30,7 +30,7 @@
  *   SPEED_TEST_SOURCE（可选）— 测速源：worker=自有 Worker 代理(默认) / official=直连官方端点 / 其他=自定义 URL
  *   SPEED_TEST_SOURCE_URL（可选）— 自定义测速源 URL（SPEED_TEST_SOURCE 非 worker/official 时使用）
  *   COLO_FILTER（可选）    — 数据中心过滤，逗号分隔（如 HKG,LAX），留空=不过滤
- *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次不取平均）
+ *   LATENCY_SAMPLES（可选）— 延迟采样次数（默认 10，1=单次采样）
  *   MAX_PACKET_LOSS_RATE（可选）— 丢包率上限，超过则过滤（默认 0.1 = 10%）
  *   IP_SOURCE（可选）     — IP 来源：domain=域名解析(默认) / cidr=CF CIDR扫描 / both=两者合并 / isp=仅三网API / 自定义(CIDR,IP,域名混合)
  *   CIDR_SAMPLES（可选）  — 每个 CIDR 最多采样 IP 数（默认 100）
@@ -71,7 +71,7 @@ const SPEED_TEST_HOST = process.env.SPEED_TEST_HOST || '';
 const COLO_FILTER = process.env.COLO_FILTER
   ? process.env.COLO_FILTER.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
   : [];
-// 延迟采样次数（默认 10，1=单次不取平均）
+// 延迟采样次数（默认 10，1=单次采样，≥2 时取中位数）
 const LATENCY_SAMPLES = Math.min(Math.max(parseInt(process.env.LATENCY_SAMPLES || '10', 10), 1), 20);
 // 丢包率上限，超过则过滤（默认 0.1 = 10%）
 const MAX_PACKET_LOSS_RATE = parseFloat(process.env.MAX_PACKET_LOSS_RATE || '0.1');

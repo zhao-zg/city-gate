@@ -150,7 +150,7 @@ node "$script" 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
 **文件**: `docker/docker-compose.yml` 第 38 行
 
 ```yaml
-# ── 延迟采样次数（默认 3，1=单次不取平均） ──
+# ── 延迟采样次数（默认 3，1=单次采样） ──
 - LATENCY_SAMPLES=${LATENCY_SAMPLES:-10}
 ```
 
@@ -159,7 +159,7 @@ node "$script" 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
 **修复建议**: 将注释改为 `默认 10`：
 
 ```yaml
-# ── 延迟采样次数（默认 10，1=单次不取平均） ──
+# ── 延迟采样次数（默认 10，1=单次采样） ──
 ```
 
 ---
